@@ -45,9 +45,9 @@ exports.create = async (req, res) => {
 
   // Build order message
   // FIX 3: Renamed variable consistently to `orderText`
-  let orderText = `╔══════════════════╗\n`;
-  orderText += `║                🛎️ ការបញ្ជាទិញថ្មី 🛎️    \n`;
-  orderText += `╚══════════════════╝\n`;
+  let orderText = "";
+  orderText +=    `🛎️ ការបញ្ជាទិញថ្មី 🛎️ \n`;
+  orderText +=    `═══════════════\n`;
   orderText += `📅 ${fmtDate(now)}  ${fmtTime(now)}\n`;
   orderText += `🪑 តុលេខ: ${table_no.trim()}\n\n`;
   orderText += `📋 បញ្ជីម្ហូប:\n`;
