@@ -1,4 +1,3 @@
-// backend/controllers/ordersController.js
 const axios = require("axios");
 
 // POST /api/orders - Send order to Telegram only (no DB storage)
@@ -23,28 +22,45 @@ exports.create = async (req, res) => {
     return res.status(500).json({ error: "Telegram not configured" });
   }
 
-  // Build order message
-  let orderText = `🛎️ **NEW ORDER** 🛎️\n\n`;
-  orderText += `📅 ${new Date().toLocaleString("en-US", { hour12: false })}\n`;
-  orderText += `🪑 **Table:** ${table_no.trim()}\n`;
-  orderText += `━ ━ ━ ━ ━ ━ ━ ━ ━\n`;
-  orderText += `📋 **Order Details:**\n`;
+  // FIX 1: Define helper functions for date/time formatting
+  const now = new Date();
+  const fmtDate = (d) =>
+    d.toLocaleDateString("km-KH", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+  const fmtTime = (d) =>
+    d.toLocaleTimeString("km-KH", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
 
+  // FIX 2: Calculate total before building the message
   let total = 0;
-  items.forEach((item, idx) => {
-    const subtotal = item.price * item.qty;
-    total += subtotal;
-    orderText += `${idx + 1}. ${item.name} × ${item.qty} = ${subtotal.toFixed(2)}៛\n`;
+  items.forEach((item) => {
+    total += item.price * item.qty;
   });
 
-  orderText += `━ ━ ━ ━ ━ ━ ━ ━ ━\n`;
-  orderText += `💰 **Total:** ${total.toFixed(2)}៛\n`;
-
-  if (note && note.trim()) {
-    orderText += `\n📝 **Note:** ${note.trim()}\n`;
-  }
-
-  orderText += `\n✅ Please prepare this order.`;
+  // Build order message
+  // FIX 3: Renamed variable consistently to `orderText`
+  let orderText = `╔══════════════════╗\n`;
+  orderText += `║                🛎️ ការបញ្ជាទិញថ្មី 🛎️    \n`;
+  orderText += `╚══════════════════╝\n`;
+  orderText += `📅 ${fmtDate(now)}  ${fmtTime(now)}\n`;
+  orderText += `🪑 តុលេខ: ${table_no.trim()}\n\n`;
+  orderText += `📋 បញ្ជីម្ហូប:\n`;
+  orderText += `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n`;
+  items.forEach((item, n) => {
+    const sub = item.price * item.qty;
+    orderText += `${n + 1}. ${item.name}\n`;
+    orderText += `   ${item.qty} × ${item.price.toLocaleString()} = ${sub.toLocaleString()}៛\n`;
+  });
+  orderText += `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n`;
+  orderText += `💰 សរុបទឹកប្រាក់: ${total.toLocaleString()}៛\n`;
+  if (note?.trim()) orderText += `\n📝 កំណត់ចំណាំ: ${note.trim()}\n`;
+  orderText += `\n✅ សូមរៀបចំម្ហូបនេះផង!`;
 
   try {
     // Send to Telegram
@@ -52,7 +68,9 @@ exports.create = async (req, res) => {
     await axios.post(telegramUrl, {
       chat_id: TELEGRAM_CHAT_ID,
       text: orderText,
-      parse_mode: "Markdown",
+      // FIX 4: Use MarkdownV2 or plain HTML — plain "Markdown" causes issues
+      // with special chars like `.` `(` `)` in Khmer text. Switch to HTML:
+      parse_mode: "HTML",
     });
 
     res.status(200).json({

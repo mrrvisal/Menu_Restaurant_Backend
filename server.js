@@ -29,9 +29,9 @@ app.use((err, req, res, next) => {
   }
   res.status(500).json({ error: "Something went wrong!" });
 });
-
 // Start server
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`📍 API URL: http://localhost:${PORT}/api`);
+  
 });
