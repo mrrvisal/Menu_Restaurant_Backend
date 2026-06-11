@@ -19,15 +19,6 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 const apiRoutes = require("./routes");
 app.use("/api", apiRoutes);
 
-// Serve frontend static files in production
-const frontendDist = path.join(__dirname, "..", "Menu_Restaurant_Frontend", "dist");
-app.use(express.static(frontendDist));
-
-// Serve index.html for all non-API routes (SPA support)
-app.get("*", (req, res) => {
-  res.sendFile(path.join(frontendDist, "index.html"));
-});
-
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
