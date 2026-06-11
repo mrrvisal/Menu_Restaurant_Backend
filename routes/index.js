@@ -43,4 +43,50 @@ router.delete("/foods/:id", auth, foodsCtrl.remove);
 // ─── ORDERS ──────────────────────────────────────────────────
 router.post("/orders", ordersCtrl.create);
 
+// ─── TABLE QR CODES ────────────────────────────────────────
+const QRCode = require("qrcode");
+
+// GET /api/qr/table/:number - Generate QR for a table
+router.get("/qr/table/:number", async (req, res) => {
+  try {
+    const tableNumber = req.params.number;
+    if (!tableNumber || isNaN(tableNumber)) {
+      return res.status(400).json({ error: "Invalid table number" });
+    }
+
+    // Use the server's own URL (works locally + in production)
+    const host = req.get("host");
+    const protocol = req.protocol;
+    const frontendUrl = process.env.FRONTEND_URL || `${protocol}://${host}`;
+    const qrUrl = `${frontendUrl}?table=${tableNumber}`;
+
+    const qrCodeDataUrl = await QRCode.toDataURL(qrUrl, {
+      width: 500,
+      margin: 2,
+      color: { dark: "#000000", light: "#ffffff" },
+    });
+
+    // Also return as PNG stream for downloading
+    if (req.query.format === "png") {
+      const pngBuffer = await QRCode.toBuffer(qrUrl, {
+        width: 500,
+        margin: 2,
+      });
+      res.setHeader("Content-Type", "image/png");
+      res.setHeader("Content-Disposition", `attachment; filename="table-${tableNumber}.png"`);
+      return res.send(pngBuffer);
+    }
+
+    res.json({
+      success: true,
+      tableNumber: parseInt(tableNumber),
+      qrCode: qrCodeDataUrl,
+      url: qrUrl,
+    });
+  } catch (error) {
+    console.error("QR generation error:", error.message);
+    res.status(500).json({ error: "Failed to generate QR code" });
+  }
+});
+
 module.exports = router;
