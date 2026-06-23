@@ -34,7 +34,7 @@ exports.create = async (req, res) => {
     d.toLocaleTimeString("km-KH", {
       hour: "2-digit",
       minute: "2-digit",
-      hour12: false,
+      hour12: true,
     });
 
   // FIX 2: Calculate total before building the message
@@ -54,7 +54,7 @@ exports.create = async (req, res) => {
   orderText += `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n`;
   items.forEach((item, n) => {
     const sub = item.price * item.qty;
-    orderText += `${n + 1}. ${item.name}\n`;
+    orderText += `=> ${item.name}\n`;
     orderText += `   ${item.qty} × ${item.price.toLocaleString()} = ${sub.toLocaleString()}៛\n`;
   });
   orderText += `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n`;

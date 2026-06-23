@@ -44,7 +44,7 @@ router.delete("/foods/:id", auth, foodsCtrl.remove);
 router.post("/orders", ordersCtrl.create);
 
 // ─── TABLE QR CODES ────────────────────────────────────────
-const QRCode = require("qrcode");
+const { generateQrWithLogo } = require("../helpers/qrWithLogo");
 
 // GET /api/qr/table/:number - Generate QR for a table
 router.get("/qr/table/:number", async (req, res) => {
@@ -60,22 +60,31 @@ router.get("/qr/table/:number", async (req, res) => {
     const frontendUrl = process.env.FRONTEND_URL || `${protocol}://${host}`;
     const qrUrl = `${frontendUrl}?table=${tableNumber}`;
 
-    const qrCodeDataUrl = await QRCode.toDataURL(qrUrl, {
-      width: 500,
-      margin: 2,
-      color: { dark: "#000000", light: "#ffffff" },
-    });
+    // Natural / earthy color palette
+    const darkColor = "#2d5a27";   // deep forest green
+    const lightColor = "#f5f0e8";  // warm cream
 
-    // Also return as PNG stream for downloading
+    // Also return as PNG stream for downloading (includes logo)
     if (req.query.format === "png") {
-      const pngBuffer = await QRCode.toBuffer(qrUrl, {
+      const pngBuffer = await generateQrWithLogo(qrUrl, {
         width: 500,
         margin: 2,
+        darkColor,
+        lightColor,
       });
       res.setHeader("Content-Type", "image/png");
       res.setHeader("Content-Disposition", `attachment; filename="table-${tableNumber}.png"`);
       return res.send(pngBuffer);
     }
+
+    // Default JSON – generate with logo and convert to data URL
+    const pngBuffer = await generateQrWithLogo(qrUrl, {
+      width: 500,
+      margin: 2,
+      darkColor,
+      lightColor,
+    });
+    const qrCodeDataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
 
     res.json({
       success: true,
