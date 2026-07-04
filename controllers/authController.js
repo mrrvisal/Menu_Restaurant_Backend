@@ -288,37 +288,51 @@ exports.forgotPassword = async (req, res) => {
 
     // Send password reset email (non-blocking - don't await)
     const resetUrl = `${FRONTEND_URL}/reset-password?token=${token}`;
-    sendMail({
-      to: email.trim(),
-      subject: "Reset your password - Digital Menu",
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
-          <div style="text-align: center; margin-bottom: 24px;">
-            <div style="width: 48px; height: 48px; background: #ea580c; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center;">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-              </svg>
-            </div>
+    const html = `
+      <div style="font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.08); border: 1px solid #e5f0e8;">
+        <div style="background: linear-gradient(135deg, #0f766e 0%, #22c55e 100%); padding: 32px 24px; text-align: center;">
+          <div style="width: 56px; height: 56px; background: rgba(255, 255, 255, 0.2); border-radius: 16px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 12px;">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93"/>
+              <path d="M12 2a4 4 0 0 0-4 4c0 1.95 1.4 3.58 3.25 3.93"/>
+              <path d="M12 10c-3.5 0-6 1.5-6 3.5S6.5 17 8 17v2h8v-2c1.5 0 3-1 3-3.5S15.5 13 12 13z"/>
+            </svg>
           </div>
-          <h2 style="color: #14532d; text-align: center; margin-bottom: 16px;">Reset Your Password</h2>
-          <p style="color: #4a6650; line-height: 1.6; margin-bottom: 20px;">
-            You requested a password reset for your Digital Menu account. Click the button below to set a new password. This link expires in 1 hour.
+          <h1 style="color: #ffffff; font-size: 22px; font-weight: 700; margin: 0;">Digital Menu</h1>
+          <p style="color: rgba(255, 255, 255, 0.85); font-size: 13px; margin-top: 6px;">Reset your password</p>
+        </div>
+        <div style="padding: 32px 28px;">
+          <p style="color: #374151; font-size: 15px; line-height: 1.7; margin-top: 0;">
+            Hello,
           </p>
-          <div style="text-align: center; margin-bottom: 24px;">
-            <a href="${resetUrl}" style="display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #ea580c, #f97316); color: white; text-decoration: none; border-radius: 10px; font-weight: 700; font-size: 14px;">
+          <p style="color: #4b5563; font-size: 14px; line-height: 1.7;">
+            You requested a password reset for your Digital Menu account. Click the button below to set a new password.
+          </p>
+          <div style="text-align: center; margin: 28px 0;">
+            <a href="${resetUrl}" style="display: inline-block; padding: 14px 36px; background: linear-gradient(135deg, #22c55e); color: white; text-decoration: none; border-radius: 10px; font-weight: 700; font-size: 14px; box-shadow: 0 4px 14px rgba(234, 88, 12, 0.3);">
               Reset Password
             </a>
           </div>
-          <p style="color: #6b7280; font-size: 12px; text-align: center;">
-            Or copy this link into your browser:<br/>
-            <a href="${resetUrl}" style="color: #f97316; word-break: break-all;">${resetUrl}</a>
+          <p style="color: #6b7280; font-size: 12px; line-height: 1.6; text-align: center;">
+            This link expires in <strong>1 hour</strong>.<br/>
+            If the button above doesn't work, copy and paste this link into your browser:
           </p>
-          <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;" />
-          <p style="color: #9ca3af; font-size: 11px; text-align: center;">
-            If you didn't request a password reset, please ignore this email.
+          <div style="background: #f8faf7; border: 1px dashed #d1d5db; border-radius: 8px; padding: 10px 14px; margin-top: 10px; word-break: break-all;">
+            <a href="${resetUrl}" style="color: #22c55e; font-size: 12px; text-decoration: none;">${resetUrl}</a>
+          </div>
+        </div>
+        <div style="background: #f9fafb; border-top: 1px solid #e5f0e8; padding: 18px 28px; text-align: center;">
+          <p style="color: #9ca3af; font-size: 11px; margin: 0;">
+            If you didn't request a password reset, please ignore this email.<br/>
+            © ${new Date().getFullYear()} Digital Menu. All rights reserved.
           </p>
         </div>
-      `,
+      </div>
+    `;
+    sendMail({
+      to: email.trim(),
+      subject: "Reset your password - Digital Menu",
+      html,
     }).catch(err => console.error("Background email send failed:", err.message));
 
     res.json({ message: "Password reset link has been sent to your email." });

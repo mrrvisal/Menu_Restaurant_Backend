@@ -1,5 +1,8 @@
 const QRCode = require("qrcode");
 const sharp = require("sharp");
+const crypto = require("crypto");
+
+const QR_SECRET = process.env.QR_SECRET || "fallback-qr-secret-change-in-production";
 
 /**
  * Generate a QR code PNG buffer with a center logo and natural color palette.
@@ -13,6 +16,29 @@ const sharp = require("sharp");
  * @param {string}  [opts.lightColor="#f5f0e8"] - Light module colour (warm cream)
  * @returns {Promise<Buffer>} PNG buffer
  */
+function encryptRestaurantId(restaurantId) {
+  const iv = crypto.randomBytes(16);
+  const key = Buffer.from(QR_SECRET.padEnd(32).slice(0, 32));
+  const cipher = crypto.createCipheriv("aes-256-cbc", key, iv);
+  const encrypted = Buffer.concat([cipher.update(String(restaurantId), "utf8"), cipher.final()]);
+  return `${iv.toString("base64url")}.${encrypted.toString("base64url")}`;
+}
+
+function decryptRestaurantId(token) {
+  try {
+    const [ivBase64, encryptedBase64] = token.split(".");
+    const iv = Buffer.from(ivBase64, "base64url");
+    const encrypted = Buffer.from(encryptedBase64, "base64url");
+    const key = Buffer.from(QR_SECRET.padEnd(32).slice(0, 32));
+    const decipher = crypto.createDecipheriv("aes-256-cbc", key, iv);
+    const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    const result = parseInt(decrypted.toString("utf8"), 10);
+    return isNaN(result) ? null : result;
+  } catch {
+    return null;
+  }
+}
+
 async function generateQrWithLogo(data, opts = {}) {
   const {
     width = 500,
@@ -82,4 +108,4 @@ async function generateQrWithLogo(data, opts = {}) {
   return finalBuffer;
 }
 
-module.exports = { generateQrWithLogo };
+module.exports = { generateQrWithLogo, encryptRestaurantId, decryptRestaurantId };

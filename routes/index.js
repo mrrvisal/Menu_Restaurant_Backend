@@ -177,7 +177,7 @@ router.get("/admin/stats", auth, requireSuperAdmin, async (req, res) => {
 });
 
 // ─── QR CODES ──────────────────────────────────────────────
-const { generateQrWithLogo } = require("../helpers/qrWithLogo");
+const { generateQrWithLogo, encryptRestaurantId } = require("../helpers/qrWithLogo");
 
 router.get("/qr/table/:number", softAuth, async (req, res) => {
   try {
@@ -198,7 +198,10 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
     const frontendUrl =
       process.env.FRONTEND_URL || `${req.protocol}://${req.get("host")}`;
     let qrUrl = `${frontendUrl}?table=${tableNumber}`;
-    if (restaurantId) qrUrl += `&restaurant_id=${restaurantId}`;
+    if (restaurantId) {
+      const encryptedId = encryptRestaurantId(restaurantId);
+      qrUrl += `&rid=${encryptedId}`;
+    }
 
     const darkColor = "#2d5a27";
     const lightColor = "#f5f0e8";
