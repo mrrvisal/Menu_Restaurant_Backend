@@ -1,40 +1,64 @@
 // backend/controllers/foodsController.js
 const db = require("../config/db");
 const imagekit = require("../config/imagekit");
-const path = require("path");
 
-// ✅ FIXED: Delete by fileId stored in DB, not by parsing the URL
-// ImageKit URLs look like: https://ik.imagekit.io/xxx/menu_foods/food_123.jpg
-// But deleteFile() needs the actual fileId from ImageKit's API (e.g. "65abc123def456")
-// We store it separately in the `img_file_id` column.
+// Helper: get restaurant_id for public requests
+async function getRestaurantId(req) {
+  if (req.query.restaurant_id) return parseInt(req.query.restaurant_id);
+  if (req.user) {
+    const [rows] = await db.query(
+      "SELECT id FROM restaurants WHERE owner_id = ?",
+      [req.user.id],
+    );
+    if (rows.length) return rows[0].id;
+  }
+  return 1;
+}
+
 async function deleteFromImageKit(fileId) {
   if (!fileId) return;
   try {
     await imagekit.deleteFile(fileId);
-    console.log(`✅ Deleted from ImageKit: ${fileId}`);
   } catch (err) {
-    // Don't crash if delete fails (file may already be gone)
-    console.error("⚠️ Failed to delete from ImageKit:", err.message);
+    console.error("Failed to delete from ImageKit:", err.message);
   }
 }
 
-// GET /api/foods
+// GET /api/foods?restaurant_id=X&category=X&search=xxx
 exports.getAll = async (req, res) => {
   try {
+    const restaurantId = await getRestaurantId(req);
     const { category, search } = req.query;
-    let sql = "SELECT * FROM foods WHERE 1=1";
-    const params = [];
+
+    let sql = `SELECT f.*, c.name AS category_name
+               FROM foods f
+               LEFT JOIN categories c ON f.category = c.id
+               WHERE f.restaurant_id = ?`;
+    const params = [restaurantId];
     if (category) {
-      sql += " AND category = ?";
+      sql += " AND f.category = ?";
       params.push(category);
     }
     if (search) {
-      sql += " AND name LIKE ?";
+      sql += " AND f.name LIKE ?";
       params.push(`%${search}%`);
     }
-    sql += " ORDER BY id ASC";
+    sql += " ORDER BY f.id ASC";
+
     const [rows] = await db.query(sql, params);
-    res.json(rows);
+    const result = rows.map((f) => ({
+      id: f.id,
+      restaurant_id: f.restaurant_id,
+      name: f.name,
+      price: f.price,
+      category: f.category,
+      category_name: f.category_name,
+      img: f.img,
+      img_url: f.img,
+      img_file_id: f.img_file_id,
+      status: f.status,
+    }));
+    res.json(result);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server error" });
@@ -54,51 +78,46 @@ exports.getOne = async (req, res) => {
   }
 };
 
-// POST /api/foods (admin)
+// POST /api/foods
 exports.create = async (req, res) => {
   try {
     const { name, price, category, status } = req.body;
-    if (!name || !price || !category) {
+    if (!name || !price || !category)
       return res.status(400).json({ error: "name, price, category required" });
-    }
 
-    let img = null;
-    let imgFileId = null; // ✅ Store ImageKit fileId for later deletion
+    const [restaurant] = await db.query(
+      "SELECT id FROM restaurants WHERE owner_id = ?",
+      [req.user.id],
+    );
+    if (!restaurant.length)
+      return res.status(404).json({ error: "Restaurant not found" });
+    const restaurantId = restaurant[0].id;
 
+    let img = null,
+      imgFileId = null;
     if (req.file) {
       try {
-        console.log("Starting ImageKit upload...", {
-          name: req.file.originalname,
-          size: req.file.size,
-          type: req.file.mimetype,
-        });
-
-        // ✅ req.file.buffer works because we use memoryStorage in routes/index.js
         const base64 = req.file.buffer.toString("base64");
         const dataUri = `data:${req.file.mimetype};base64,${base64}`;
-
         const uploadResult = await imagekit.upload({
           file: dataUri,
           fileName: `food_${Date.now()}_${req.file.originalname.replace(/[^a-zA-Z0-9.]/g, "_")}`,
           folder: "/menu_foods",
           useUniqueFileName: true,
         });
-
-        img = uploadResult.url; // ✅ Full CDN URL for displaying in frontend
-        imgFileId = uploadResult.fileId; // ✅ ImageKit fileId for deleting later
-        console.log("✅ Upload successful:", img);
+        img = uploadResult.url;
+        imgFileId = uploadResult.fileId;
       } catch (uploadErr) {
-        console.error("❌ ImageKit upload error:", uploadErr.message);
         return res
           .status(500)
           .json({ error: `Image upload failed: ${uploadErr.message}` });
       }
     }
 
-    // ✅ Save both img (URL) and img_file_id (for deletion)
     const [result] = await db.query(
-      "INSERT INTO foods (name, price, category, img, img_file_id, status) VALUES (?,?,?,?,?,?)",
+      "INSERT INTO foods (restaurant_id, name, price, category, img, img_file_id, status) VALUES (?,?,?,?,?,?,?)",
       [
+        restaurantId,
         name,
         parseFloat(price),
         category,
@@ -113,57 +132,45 @@ exports.create = async (req, res) => {
     ]);
     res.status(201).json(newRow[0]);
   } catch (err) {
-    console.error("Server error:", err);
     res.status(500).json({ error: "Server error: " + err.message });
   }
 };
 
-// PATCH /api/foods/:id (admin)
+// PATCH /api/foods/:id
 exports.update = async (req, res) => {
   try {
     const { name, price, category, status } = req.body;
-    const [exists] = await db.query("SELECT * FROM foods WHERE id = ?", [
-      req.params.id,
-    ]);
+    const [exists] = await db.query(
+      "SELECT f.* FROM foods f JOIN restaurants r ON r.id = f.restaurant_id WHERE f.id = ? AND r.owner_id = ?",
+      [req.params.id, req.user.id],
+    );
     if (!exists.length) return res.status(404).json({ error: "Not found" });
 
-    let img = exists[0].img;
-    let imgFileId = exists[0].img_file_id;
-
+    let img = exists[0].img,
+      imgFileId = exists[0].img_file_id;
     if (req.file) {
-      // Delete old image from ImageKit using stored fileId
-      if (imgFileId) {
-        await deleteFromImageKit(imgFileId);
-      }
-
+      if (imgFileId) await deleteFromImageKit(imgFileId);
       try {
         const base64 = req.file.buffer.toString("base64");
         const dataUri = `data:${req.file.mimetype};base64,${base64}`;
-
         const uploadResult = await imagekit.upload({
           file: dataUri,
           fileName: `food_${Date.now()}_${req.file.originalname.replace(/[^a-zA-Z0-9.]/g, "_")}`,
           folder: "/menu_foods",
           useUniqueFileName: true,
         });
-
         img = uploadResult.url;
-        imgFileId = uploadResult.fileId; // ✅ Update fileId too
-        console.log("✅ Updated image:", img);
+        imgFileId = uploadResult.fileId;
       } catch (uploadErr) {
-        console.error("ImageKit upload error:", uploadErr);
         return res.status(500).json({ error: "Failed to upload image" });
       }
     }
 
     await db.query(
       `UPDATE foods SET
-        name         = COALESCE(?, name),
-        price        = COALESCE(?, price),
-        category     = COALESCE(?, category),
-        img          = ?,
-        img_file_id  = ?,
-        status       = COALESCE(?, status)
+        name = COALESCE(?, name), price = COALESCE(?, price),
+        category = COALESCE(?, category), img = ?, img_file_id = ?,
+        status = COALESCE(?, status)
        WHERE id = ?`,
       [
         name || null,
@@ -181,17 +188,17 @@ exports.update = async (req, res) => {
     ]);
     res.json(updated[0]);
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Server error" });
   }
 };
 
-// PATCH /api/foods/:id/status (admin)
+// PATCH /api/foods/:id/status
 exports.toggleStatus = async (req, res) => {
   try {
-    const [rows] = await db.query("SELECT status FROM foods WHERE id = ?", [
-      req.params.id,
-    ]);
+    const [rows] = await db.query(
+      "SELECT f.status FROM foods f JOIN restaurants r ON r.id = f.restaurant_id WHERE f.id = ? AND r.owner_id = ?",
+      [req.params.id, req.user.id],
+    );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
     const newStatus =
       rows[0].status === "available" ? "unavailable" : "available";
@@ -205,24 +212,18 @@ exports.toggleStatus = async (req, res) => {
   }
 };
 
-// DELETE /api/foods/:id (admin)
+// DELETE /api/foods/:id
 exports.remove = async (req, res) => {
   try {
     const [rows] = await db.query(
-      "SELECT img, img_file_id FROM foods WHERE id = ?",
-      [req.params.id],
+      "SELECT f.img_file_id FROM foods f JOIN restaurants r ON r.id = f.restaurant_id WHERE f.id = ? AND r.owner_id = ?",
+      [req.params.id, req.user.id],
     );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
-
-    // ✅ Delete image from ImageKit using stored fileId
-    if (rows[0].img_file_id) {
-      await deleteFromImageKit(rows[0].img_file_id);
-    }
-
+    if (rows[0].img_file_id) await deleteFromImageKit(rows[0].img_file_id);
     await db.query("DELETE FROM foods WHERE id = ?", [req.params.id]);
     res.json({ message: "Deleted successfully" });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Server error" });
   }
 };
