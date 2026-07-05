@@ -199,8 +199,8 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
       process.env.FRONTEND_URL || `${req.protocol}://${req.get("host")}`;
     let qrUrl = `${frontendUrl}?table=${tableNumber}`;
     if (restaurantId) {
-      const encryptedId = encryptRestaurantId(restaurantId);
-      qrUrl += `&rid=${encryptedId}`;
+      const obfuscatedId = Buffer.from(String(restaurantId)).toString("base64url");
+      qrUrl += `&restaurant_id=${obfuscatedId}`;
     }
 
     const darkColor = "#2d5a27";
