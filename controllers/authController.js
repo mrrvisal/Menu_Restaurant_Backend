@@ -290,14 +290,7 @@ exports.forgotPassword = async (req, res) => {
     const resetUrl = `${FRONTEND_URL}/reset-password?token=${token}`;
     const html = `
       <div style="font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.08); border: 1px solid #e5f0e8;">
-        <div style="background: linear-gradient(135deg, #0f766e 0%, #22c55e 100%); padding: 32px 24px; text-align: center;">
-          <div style="width: 56px; height: 56px; background: rgba(255, 255, 255, 0.2); border-radius: 16px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 12px;">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93"/>
-              <path d="M12 2a4 4 0 0 0-4 4c0 1.95 1.4 3.58 3.25 3.93"/>
-              <path d="M12 10c-3.5 0-6 1.5-6 3.5S6.5 17 8 17v2h8v-2c1.5 0 3-1 3-3.5S15.5 13 12 13z"/>
-            </svg>
-          </div>
+        <div style="background: linear-gradient(135deg, #0f766e 0%, #22c55e 100%); padding: 32px 24px; text-align: center; padding-top: 50px;">
           <h1 style="color: #ffffff; font-size: 22px; font-weight: 700; margin: 0;">Digital Menu</h1>
           <p style="color: rgba(255, 255, 255, 0.85); font-size: 13px; margin-top: 6px;">Reset your password</p>
         </div>
@@ -448,6 +441,68 @@ exports.unlinkTelegram = async (req, res) => {
     res.json({ success: true, message: "Telegram unlinked" });
   } catch (err) {
     console.error("Unlink Telegram error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// ─── UPDATE RESTAURANT PROFILE ─────────────────────────────
+exports.updateRestaurant = async (req, res) => {
+  const { name } = req.body;
+  let logoUrl = req.body.logoUrl;
+
+  if (!name || !name.trim()) {
+    return res.status(400).json({ error: "Restaurant name is required" });
+  }
+
+  // Handle logo upload if provided
+  if (req.file) {
+    try {
+      const imagekit = require("../config/imagekit");
+      const base64 = req.file.buffer.toString("base64");
+      const dataUri = `data:${req.file.mimetype};base64,${base64}`;
+      const uploadResult = await imagekit.upload({
+        file: dataUri,
+        fileName: `logo_${Date.now()}_${req.file.originalname.replace(/[^a-zA-Z0-9.]/g, "_")}`,
+        folder: "/restaurant_logos",
+        useUniqueFileName: true,
+      });
+      logoUrl = uploadResult.url;
+    } catch (uploadErr) {
+      console.error("Logo upload error:", uploadErr.message);
+    }
+  }
+
+  try {
+    await db.query(
+      "UPDATE restaurants SET name = ?, logo_url = COALESCE(?, logo_url) WHERE owner_id = ?",
+      [name.trim(), logoUrl || null, req.user.id],
+    );
+
+    // Fetch updated restaurant
+    const [rows] = await db.query(
+      `SELECT id, name, logo_url, telegram_chat_id, telegram_link_code, default_language
+       FROM restaurants WHERE owner_id = ?`,
+      [req.user.id],
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: "Restaurant not found" });
+    }
+
+    const r = rows[0];
+    res.json({
+      success: true,
+      restaurant: {
+        id: r.id,
+        name: r.name,
+        logoUrl: r.logo_url,
+        telegramChatId: r.telegram_chat_id,
+        telegramLinkCode: r.telegram_link_code,
+        defaultLanguage: r.default_language,
+      },
+    });
+  } catch (err) {
+    console.error("Update restaurant error:", err);
     res.status(500).json({ error: "Server error" });
   }
 };

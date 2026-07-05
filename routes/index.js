@@ -57,6 +57,7 @@ router.get("/auth/me", auth, authCtrl.me);
 router.get("/auth/link-code", auth, authCtrl.getLinkCode);
 router.patch("/auth/unlink-telegram", auth, authCtrl.unlinkTelegram);
 router.patch("/auth/language", auth, authCtrl.updateLanguage);
+router.patch("/auth/restaurant", auth, upload.single("logo"), authCtrl.updateRestaurant);
 
 // ─── TELEGRAM BOT ──────────────────────────────────────────
 router.post("/telegram/webhook", telegramCtrl.webhook);
@@ -177,7 +178,11 @@ router.get("/admin/stats", auth, requireSuperAdmin, async (req, res) => {
 });
 
 // ─── QR CODES ──────────────────────────────────────────────
-const { generateQrWithLogo, encryptRestaurantId } = require("../helpers/qrWithLogo");
+const {
+  generateQrWithLogo,
+  encryptRestaurantId,
+  decryptRestaurantId,
+} = require("../helpers/qrWithLogo");
 
 router.get("/qr/table/:number", softAuth, async (req, res) => {
   try {
@@ -197,10 +202,10 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
 
     const frontendUrl =
       process.env.FRONTEND_URL || `${req.protocol}://${req.get("host")}`;
-    let qrUrl = `${frontendUrl}?table=${tableNumber}`;
+    let qrUrl = `${frontendUrl}/menu?table=${tableNumber}`;
     if (restaurantId) {
-      const obfuscatedId = Buffer.from(String(restaurantId)).toString("base64url");
-      qrUrl += `&restaurant_id=${obfuscatedId}`;
+      const encryptedToken = encryptRestaurantId(restaurantId);
+      qrUrl += `&rid=${encodeURIComponent(encryptedToken)}`;
     }
 
     const darkColor = "#2d5a27";
@@ -237,6 +242,44 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: "Failed to generate QR code" });
+  }
+});
+
+// GET /api/qr/decrypt - Decrypt restaurant token
+router.get("/qr/decrypt", softAuth, (req, res) => {
+  try {
+    const token = req.query.rid || req.query.token;
+    if (!token) {
+      return res.status(400).json({ error: "Missing token" });
+    }
+
+    const decrypted = decryptRestaurantId(token);
+    if (!decrypted) {
+      return res.status(400).json({ error: "Invalid or expired token" });
+    }
+
+    res.json({ restaurantId: decrypted });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to decrypt token" });
+  }
+});
+
+// GET /api/restaurants/share-link/:id - Generate shareable link with encrypted token
+router.get("/restaurants/share-link/:id", softAuth, (req, res) => {
+  try {
+    const restaurantId = parseInt(req.params.id);
+    if (isNaN(restaurantId)) {
+      return res.status(400).json({ error: "Invalid restaurant ID" });
+    }
+
+    const encryptedToken = encryptRestaurantId(restaurantId);
+    const frontendUrl =
+      process.env.FRONTEND_URL || `${req.protocol}://${req.get("host")}`;
+    const shareLink = `${frontendUrl}/menu?rid=${encodeURIComponent(encryptedToken)}`;
+
+    res.json({ shareLink, token: encryptedToken });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to generate share link" });
   }
 });
 

@@ -2,7 +2,8 @@ const QRCode = require("qrcode");
 const sharp = require("sharp");
 const crypto = require("crypto");
 
-const QR_SECRET = process.env.QR_SECRET || "fallback-qr-secret-change-in-production";
+const QR_SECRET =
+  process.env.QR_SECRET || "fallback-qr-secret-change-in-production";
 
 /**
  * Generate a QR code PNG buffer with a center logo and natural color palette.
@@ -20,7 +21,10 @@ function encryptRestaurantId(restaurantId) {
   const iv = crypto.randomBytes(16);
   const key = Buffer.from(QR_SECRET.padEnd(32).slice(0, 32));
   const cipher = crypto.createCipheriv("aes-256-cbc", key, iv);
-  const encrypted = Buffer.concat([cipher.update(String(restaurantId), "utf8"), cipher.final()]);
+  const encrypted = Buffer.concat([
+    cipher.update(String(restaurantId), "utf8"),
+    cipher.final(),
+  ]);
   return `${iv.toString("base64url")}.${encrypted.toString("base64url")}`;
 }
 
@@ -31,7 +35,10 @@ function decryptRestaurantId(token) {
     const encrypted = Buffer.from(encryptedBase64, "base64url");
     const key = Buffer.from(QR_SECRET.padEnd(32).slice(0, 32));
     const decipher = crypto.createDecipheriv("aes-256-cbc", key, iv);
-    const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    const decrypted = Buffer.concat([
+      decipher.update(encrypted),
+      decipher.final(),
+    ]);
     const result = parseInt(decrypted.toString("utf8"), 10);
     return isNaN(result) ? null : result;
   } catch {
@@ -44,9 +51,9 @@ async function generateQrWithLogo(data, opts = {}) {
     width = 500,
     margin = 2,
     logoUrl = process.env.LOGO_URL ||
-      "https://res.cloudinary.com/daji2ml3y/image/upload/v1777712294/ChatGPT_Image_May_2_2026_03_39_44_PM-Picsart-BackgroundRemover_1_x4yi9t.png",
-    darkColor = "#2d5a27",    // natural deep green
-    lightColor = "#f5f0e8",   // warm cream
+      "https://res.cloudinary.com/daji2ml3y/image/upload/v1783262055/ChatGPT_Image_Jul_5_2026_09_32_32_PM_c6ziic.png",
+    darkColor = "#2d5a27", // natural deep green
+    lightColor = "#f5f0e8", // warm cream
   } = opts;
 
   // 1. Generate plain QR (with natural colours)
@@ -73,7 +80,10 @@ async function generateQrWithLogo(data, opts = {}) {
 
     // Resize, add rounded corners & a subtle white border/stroke
     const logoRounded = await sharp(logoBuffer)
-      .resize(logoSize, logoSize, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .resize(logoSize, logoSize, {
+        fit: "contain",
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+      })
       .composite([
         {
           // overlay a rounded white rect to act as a soft background behind the logo
@@ -85,7 +95,7 @@ async function generateQrWithLogo(data, opts = {}) {
                 rx="${cornerRadius}" ry="${cornerRadius}"
                 fill="white"
               />
-            </svg>`
+            </svg>`,
           ),
           blend: "dest-over",
         },
@@ -93,7 +103,11 @@ async function generateQrWithLogo(data, opts = {}) {
       .png()
       .toBuffer();
 
-    logoComposite = { input: logoRounded, top: Math.round((width - logoSize) / 2), left: Math.round((width - logoSize) / 2) };
+    logoComposite = {
+      input: logoRounded,
+      top: Math.round((width - logoSize) / 2),
+      left: Math.round((width - logoSize) / 2),
+    };
   } catch {
     // If logo download fails, just return QR without logo
     return qrBuffer;
@@ -108,4 +122,8 @@ async function generateQrWithLogo(data, opts = {}) {
   return finalBuffer;
 }
 
-module.exports = { generateQrWithLogo, encryptRestaurantId, decryptRestaurantId };
+module.exports = {
+  generateQrWithLogo,
+  encryptRestaurantId,
+  decryptRestaurantId,
+};

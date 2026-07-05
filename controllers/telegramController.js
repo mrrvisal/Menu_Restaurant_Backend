@@ -18,7 +18,8 @@ exports.webhook = async (req, res) => {
   try {
     if (text === "/start") {
       // Show welcome message with instructions
-      const welcomeMsg = `👋 សូមស្វាគមន៍ ${firstName}!\n\n` +
+      const welcomeMsg =
+        `👋 សូមស្វាគមន៍ ${firstName}!\n\n` +
         `ដើម្បីភ្ជាប់គណនីភោជនីយដ្ឋានរបស់អ្នក សូមប្រើពាក្យបញ្ជា៖\n\n` +
         `/link លេខកូដភ្ជាប់\n\n` +
         `ឧទាហរណ៍: /link ABC123\n\n` +
@@ -29,7 +30,10 @@ exports.webhook = async (req, res) => {
       const code = text.replace("/link ", "").trim().toUpperCase();
 
       if (!code) {
-        await sendTelegramMessage(chatId, "❌ សូមបញ្ចូលលេខកូដភ្ជាប់។ ឧ: /link ABC123");
+        await sendTelegramMessage(
+          chatId,
+          "❌ សូមបញ្ចូលលេខកូដភ្ជាប់។ ឧ: /link ABC123",
+        );
         return res.sendStatus(200);
       }
 
@@ -68,15 +72,17 @@ exports.webhook = async (req, res) => {
         [chatId, restaurant.id],
       );
 
-      const successMsg = `✅ ភ្ជាប់គណនីជោគជ័យ!\n\n` +
+      const successMsg =
+        `✅ ភ្ជាប់គណនីជោគជ័យ!\n\n` +
         `🏪 ភោជនីយដ្ឋាន: ${restaurant.name}\n` +
         `🆔 Chat ID: ${chatId}\n\n` +
-        `ឥឡូវនេះ អ្នកនឹងទទួលបានការជូនដំណឹងរាល់ពេលមានការកុម្ម៉ង់ថ្មី! 🎉`;
+        `ឥឡូវនេះ អ្នកនឹងទទួលបានការជូនដំណឹងរាល់ពេលមានការកម្មង់ថ្មី! 🎉`;
 
       await sendTelegramMessage(chatId, successMsg);
     } else {
       // Unknown command
-      const helpMsg = `🤖 ពាក្យបញ្ជាដែលអាចប្រើបាន៖\n\n` +
+      const helpMsg =
+        `🤖 ពាក្យបញ្ជាដែលអាចប្រើបាន៖\n\n` +
         `/start - មើលការណែនាំ\n` +
         `/link លេខកូដ - ភ្ជាប់គណនីភោជនីយដ្ឋាន`;
 
