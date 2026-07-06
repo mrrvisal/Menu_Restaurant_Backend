@@ -1,92 +1,114 @@
+// ============================================================
+// MAILER - SendGrid API (works on Render) + nodemailer fallback (local)
+// ============================================================
+// Render blocks outbound SMTP ports (587, 465).
+// SendGrid sends via HTTPS API on port 443 which Render allows.
+// Free tier: 100 emails/day.
+// ============================================================
+
+const sgMail = require("@sendgrid/mail");
 const nodemailer = require("nodemailer");
 require("dotenv").config();
 
-// Strip spaces from app password
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const smtpPass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
+const isProd = process.env.NODE_ENV === "production" || !!process.env.RENDER;
 
-// ============================================================
-// MAILER - Works on both local and Render
-// ============================================================
+// Configure SendGrid if API key is available
+if (SENDGRID_API_KEY) {
+  sgMail.setApiKey(SENDGRID_API_KEY);
+  console.log("✅ SendGrid configured");
+}
 
-// Create transporter
-// Render blocks outbound SMTP on port 587, so we use port 465 (SSL)
-// or fall back to SendGrid API
-const transporter = nodemailer.createTransport({
+// Configure nodemailer as fallback (for local dev)
+const nodemailerTransporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: parseInt(process.env.SMTP_PORT || "465"),
-  secure: process.env.SMTP_SECURE === "true" || true, // Use SSL by default
+  port: parseInt(process.env.SMTP_PORT || "587"),
+  secure: process.env.SMTP_SECURE === "true",
   auth: {
     user: process.env.SMTP_USER,
     pass: smtpPass,
   },
-  // Connection settings
-  connectionTimeout: 20000,
-  greetingTimeout: 20000,
-  socketTimeout: 20000,
-  // TLS settings
+  connectionTimeout: 10000,
+  greetingTimeout: 10000,
+  socketTimeout: 10000,
   tls: {
     rejectUnauthorized: false,
     minVersion: "TLSv1.2",
   },
-  // Force IPv4
   family: 4,
 });
 
-// Verify connection (non-blocking)
-transporter.verify((err) => {
-  if (err) {
-    console.error("❌ Mailer verification:", err.message);
-    console.log("ℹ️ Email will still be attempted on send");
-  } else {
-    console.log("✅ Mailer ready to send emails");
-  }
-});
-
 /**
- * Send email with retry
+ * Send email using SendGrid (preferred) or nodemailer (fallback)
  */
 async function sendMail({ to, subject, html }) {
   console.log(`📧 Sending email to: ${to}`);
 
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+  // Skip if no credentials configured
+  if (!SENDGRID_API_KEY && (!process.env.SMTP_USER || !smtpPass)) {
     console.log(`📧 [DEV] Email to ${to}: ${subject}`);
     return { messageId: "dev-mode" };
   }
 
-  let lastError = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  // Try SendGrid first (works on Render via HTTPS)
+  if (SENDGRID_API_KEY) {
     try {
-      console.log(`📧 Attempt ${attempt}/2...`);
-
-      const info = await transporter.sendMail({
-        from: `"${process.env.SMTP_FROM_NAME || "Digital Menu"}" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`,
+      console.log("📧 Using SendGrid API...");
+      const msg = {
         to,
+        from: {
+          email: process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || "noreply@digitalmenu.com",
+          name: process.env.SMTP_FROM_NAME || "Digital Menu",
+        },
         subject,
         html,
-      });
-
-      console.log(`✅ Email sent to ${to}: ${info.messageId}`);
-      return info;
+      };
+      const result = await sgMail.send(msg);
+      console.log(`✅ Email sent via SendGrid to ${to}`);
+      return { messageId: result[0]?.headers?.["x-message-id"] || "sent" };
     } catch (err) {
-      lastError = err;
-      console.error(`❌ Attempt ${attempt} failed:`, err.message);
-
-      // Don't retry on auth errors
-      if (err.code === "EAUTH") {
-        console.error("❌ Authentication failed - check Gmail App Password");
-        break;
+      console.error("❌ SendGrid failed:", err.message);
+      if (err.response) {
+        console.error("   Status:", err.response.statusCode);
+        console.error("   Body:", err.response.body?.errors?.[0]?.message || JSON.stringify(err.response.body).slice(0, 200));
       }
+      // Don't fallback to nodemailer in production - SendGrid is the only option
+      if (isProd) {
+        return { error: "SendGrid failed", messageId: "failed" };
+      }
+      console.log("⏳ Falling back to nodemailer...");
+    }
+  }
 
-      if (attempt < 2) {
-        const waitTime = 5000;
-        console.log(`⏳ Waiting ${waitTime}ms before retry...`);
-        await new Promise((resolve) => setTimeout(resolve, waitTime));
+  // Fallback: nodemailer (works locally)
+  if (!isProd) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        console.log(`📧 nodemailer attempt ${attempt}/2...`);
+        const info = await nodemailerTransporter.sendMail({
+          from: `"${process.env.SMTP_FROM_NAME || "Digital Menu"}" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`,
+          to,
+          subject,
+          html,
+        });
+        console.log(`✅ Email sent via nodemailer: ${info.messageId}`);
+        return info;
+      } catch (err) {
+        console.error(`❌ nodemailer attempt ${attempt} failed:`, err.message);
+        if (err.code === "EAUTH") {
+          console.error("❌ Authentication failed - check Gmail App Password");
+          break;
+        }
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+        }
       }
     }
   }
 
-  console.error(`❌ All attempts failed for ${to}`);
-  return { error: lastError?.message || "Unknown error", messageId: "failed" };
+  console.error(`❌ Failed to send email to ${to}`);
+  return { error: "All methods failed", messageId: "failed" };
 }
 
 module.exports = { sendMail };
