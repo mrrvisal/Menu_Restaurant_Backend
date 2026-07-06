@@ -1,9 +1,9 @@
 const dns = require("dns");
 
-// Prefer IPv4 DNS results to avoid ENETUNREACH on hosts without IPv6 routing
+// Prefer IPv6 DNS results
 if (typeof dns.setDefaultResultOrder === "function") {
   try {
-    dns.setDefaultResultOrder("ipv4first");
+    dns.setDefaultResultOrder("ipv6first");
   } catch (e) {
     // ignore if not supported on this Node version
   }
@@ -26,11 +26,11 @@ const transporter = nodemailer.createTransport({
   },
 
   tls: {
-    family: 4,
+    family: 6,
   },
 
   dnsLookup(hostname, options, callback) {
-    return dns.lookup(hostname, { family: 4 }, callback);
+    return dns.lookup(hostname, { family: 6 }, callback);
   },
 });
 
