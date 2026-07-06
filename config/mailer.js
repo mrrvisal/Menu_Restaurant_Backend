@@ -6,46 +6,47 @@ require("dotenv").config();
 const smtpPass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
 
 // ============================================================
-// FORCE IPv4 ONLY - Custom DNS lookup
+// FORCE IPv4 ONLY - Fix ENETUNREACH on Render
 // ============================================================
 
-// Custom DNS lookup that only uses IPv4
+// Custom DNS lookup - IPv4 only
 function ipv4Lookup(hostname, options, callback) {
-  console.log(`🔍 DNS lookup for ${hostname} (IPv4 only)...`);
+  console.log(`🔍 DNS lookup ${hostname} (IPv4 only)...`);
   dns.lookup(hostname, { family: 4 }, (err, address, family) => {
     if (err) {
-      console.error(`❌ DNS lookup failed for ${hostname}:`, err.message);
+      console.error(`❌ DNS lookup failed:`, err.message);
       return callback(err);
     }
-    console.log(`✅ DNS resolved ${hostname} -> ${address} (IPv4)`);
+    console.log(`✅ ${hostname} -> ${address} (IPv4)`);
     callback(null, address, family);
   });
 }
 
-// Create transporter
+// Create transporter with IPv4 only
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: parseInt(process.env.SMTP_PORT) || 587,
-  secure: process.env.SMTP_SECURE === "true" || false,
+  host: "smtp.gmail.com",
+  port: 587,
+  secure: false, // STARTTLS
   auth: {
     user: process.env.SMTP_USER,
     pass: smtpPass,
   },
   // Force IPv4 only
   dnsLookup: ipv4Lookup,
-  // Connection pooling
+  // Connection settings
   pool: true,
   maxConnections: 5,
   maxMessages: 100,
-  // Timeout settings
   connectionTimeout: 30000,
   greetingTimeout: 30000,
   socketTimeout: 30000,
-  // TLS configuration
+  // TLS settings
   tls: {
     rejectUnauthorized: true,
     minVersion: "TLSv1.2",
   },
+  // Disable IPv6
+  family: 4,
 });
 
 // Verify connection
@@ -70,12 +71,8 @@ transporter.verify((err) => {
 async function sendMail({ to, subject, html }) {
   console.log(`📧 Sending email to: ${to}`);
 
-  // Check if SMTP is configured
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     console.log(`📧 [DEV] Email to ${to}: ${subject}`);
-    console.log(
-      `📧 [DEV] Body: ${html.replace(/<[^>]*>/g, "").substring(0, 200)}...`,
-    );
     return { messageId: "dev-mode" };
   }
 
@@ -97,15 +94,13 @@ async function sendMail({ to, subject, html }) {
       lastError = err;
       console.error(`❌ Attempt ${attempt} failed:`, err.message);
       if (err.code) console.error(`   Code: ${err.code}`);
-      if (err.response) console.error(`   Response: ${err.response}`);
 
-      // Don't retry on authentication errors
+      // Don't retry on auth errors
       if (err.code === "EAUTH") {
-        console.error("❌ Authentication failed - check SMTP credentials");
+        console.error("❌ Authentication failed - check credentials");
         break;
       }
 
-      // Wait before retry (exponential backoff)
       if (attempt < 3) {
         const waitTime = attempt * 3000;
         console.log(`⏳ Waiting ${waitTime}ms before retry...`);
