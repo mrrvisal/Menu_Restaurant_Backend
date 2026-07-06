@@ -6,26 +6,27 @@ require("dotenv").config();
 const smtpPass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
 
 // ============================================================
-// FORCE IPv4 ONLY - Fix ENETUNREACH on Render
+// FORCE IPv4 ONLY - Custom DNS lookup
 // ============================================================
 
-// Create a custom DNS lookup function that ONLY uses IPv4
+// Custom DNS lookup that only uses IPv4
 function ipv4Lookup(hostname, options, callback) {
-  // Force family: 4 to only use IPv4
+  console.log(`🔍 DNS lookup for ${hostname} (IPv4 only)...`);
   dns.lookup(hostname, { family: 4 }, (err, address, family) => {
     if (err) {
-      console.error(`DNS lookup failed for ${hostname}:`, err.message);
+      console.error(`❌ DNS lookup failed for ${hostname}:`, err.message);
       return callback(err);
     }
-    console.log(`DNS resolved ${hostname} -> ${address} (IPv4)`);
+    console.log(`✅ DNS resolved ${hostname} -> ${address} (IPv4)`);
     callback(null, address, family);
   });
 }
 
+// Create transporter
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: 587,
-  secure: false, // STARTTLS
+  port: parseInt(process.env.SMTP_PORT) || 587,
+  secure: process.env.SMTP_SECURE === "true" || false,
   auth: {
     user: process.env.SMTP_USER,
     pass: smtpPass,
@@ -36,15 +37,15 @@ const transporter = nodemailer.createTransport({
   pool: true,
   maxConnections: 5,
   maxMessages: 100,
+  // Timeout settings
+  connectionTimeout: 30000,
+  greetingTimeout: 30000,
+  socketTimeout: 30000,
   // TLS configuration
   tls: {
     rejectUnauthorized: true,
     minVersion: "TLSv1.2",
   },
-  // Timeout settings
-  connectionTimeout: 30000, // 30 seconds
-  greetingTimeout: 30000,
-  socketTimeout: 30000,
 });
 
 // Verify connection
@@ -55,7 +56,6 @@ transporter.verify((err) => {
   if (err) {
     console.error("❌ Mailer verification FAILED:", err.message);
     if (err.code) console.error(`   Code: ${err.code}`);
-    if (err.stack) console.error(`   Stack: ${err.stack}`);
     mailerError = err;
     mailerReady = false;
   } else {
@@ -65,18 +65,13 @@ transporter.verify((err) => {
 });
 
 /**
- * Send an email with retry logic
+ * Send email with retry
  */
 async function sendMail({ to, subject, html }) {
   console.log(`📧 Sending email to: ${to}`);
-  console.log(`   Using host: ${process.env.SMTP_HOST}, port: 587`);
 
   // Check if SMTP is configured
-  if (
-    !process.env.SMTP_HOST ||
-    !process.env.SMTP_USER ||
-    !process.env.SMTP_PASS
-  ) {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     console.log(`📧 [DEV] Email to ${to}: ${subject}`);
     console.log(
       `📧 [DEV] Body: ${html.replace(/<[^>]*>/g, "").substring(0, 200)}...`,
@@ -84,11 +79,10 @@ async function sendMail({ to, subject, html }) {
     return { messageId: "dev-mode" };
   }
 
-  // Try to send with retry
   let lastError = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      console.log(`📧 Attempt ${attempt}/3 to send email to ${to}...`);
+      console.log(`📧 Attempt ${attempt}/3...`);
 
       const info = await transporter.sendMail({
         from: `"${process.env.SMTP_FROM_NAME || "Digital Menu"}" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`,
@@ -103,16 +97,17 @@ async function sendMail({ to, subject, html }) {
       lastError = err;
       console.error(`❌ Attempt ${attempt} failed:`, err.message);
       if (err.code) console.error(`   Code: ${err.code}`);
+      if (err.response) console.error(`   Response: ${err.response}`);
 
-      // Don't retry on certain errors
+      // Don't retry on authentication errors
       if (err.code === "EAUTH") {
-        console.error("❌ Authentication failed - check SMTP password");
+        console.error("❌ Authentication failed - check SMTP credentials");
         break;
       }
 
       // Wait before retry (exponential backoff)
       if (attempt < 3) {
-        const waitTime = attempt * 2000;
+        const waitTime = attempt * 3000;
         console.log(`⏳ Waiting ${waitTime}ms before retry...`);
         await new Promise((resolve) => setTimeout(resolve, waitTime));
       }
