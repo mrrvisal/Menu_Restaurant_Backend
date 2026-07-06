@@ -5,27 +5,34 @@ require("dotenv").config();
 // Strip spaces from app password (Gmail shows it with spaces)
 const smtpPass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
 
-// Force IPv4-only transport to avoid ENETUNREACH on Render's IPv6-blocked instances
+// IPv4-only transport to avoid ENETUNREACH on Render
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT),
-  secure: process.env.SMTP_SECURE === "true",
+  port: parseInt(process.env.SMTP_PORT) || 465,
+  secure: true,
   auth: {
     user: process.env.SMTP_USER,
     pass: smtpPass,
   },
-  lookup(hostname, options, callback) {
-    dns.lookup(hostname, { family: 4 }, callback);
+  // IPv4-only DNS to avoid ENETUNREACH on Render
+  dnsLookup(hostname, options, callback) {
+    return dns.lookup(hostname, { family: 4 }, callback);
   },
+  // Connection pooling for faster subsequent sends
+  pool: true,
+  maxConnections: 5,
+  maxMessages: 100,
 });
 
-// Verify connection on startup
-transporter.verify((err) => {
-  if (err) {
-    console.warn("⚠️ Mailer not configured or connection failed:", err);
-  } else {
-    console.log("✅ Mailer ready to send emails");
-  }
+// Lazy verification to avoid blocking cold starts
+setImmediate(() => {
+  transporter.verify((err) => {
+    if (err) {
+      console.warn("⚠️ Mailer verification:", err.message);
+    } else {
+      console.log("✅ Mailer ready to send emails");
+    }
+  });
 });
 
 /**
@@ -53,8 +60,6 @@ async function sendMail({ to, subject, html }) {
     return info;
   } catch (err) {
     console.error(`📧 Failed to send email to ${to}:`, err.message);
-    // Don't throw - return a dev-mode fallback so the app still works
-    console.log(`📧 [FALLBACK] Email to ${to}: ${subject}`);
     return { messageId: "fallback" };
   }
 }
