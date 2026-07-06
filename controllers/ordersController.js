@@ -1,6 +1,6 @@
 // backend/controllers/ordersController.js
 const db = require("../config/db");
-const { sendOrderToChat } = require("./telegramController");
+const { sendOrderNotification } = require("../services/telegramBot");
 
 // POST /api/orders - Place order (guest)
 exports.create = async (req, res) => {
@@ -42,47 +42,23 @@ exports.create = async (req, res) => {
       ],
     );
     const orderId = orderResult.insertId;
-
-    // Build Telegram message
-    const now = new Date();
     const isKhmer = restaurant.default_language === "km";
-    const fmtDate = (d) =>
-      d.toLocaleDateString(isKhmer ? "km-KH" : "en-US", {
-        year: "numeric",
-        month: "long",
-        day: "numeric",
-      });
-    const fmtTime = (d) =>
-      d.toLocaleTimeString(isKhmer ? "km-KH" : "en-US", {
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: true,
-      });
 
-    let orderText = isKhmer
-      ? `🛎️ ការបញ្ជាទិញថ្មី 🛎️\n═══════════════\n🏪 ${restaurant.name}\n📅 ${fmtDate(now)} ${fmtTime(now)}\n🪑 តុលេខ: ${table_no.trim()}\n🆔 លេខកុម្មង់: #${orderId}\n`
-      : `🛎️ New Order 🛎️\n═══════════════\n🏪 ${restaurant.name}\n📅 ${fmtDate(now)} ${fmtTime(now)}\n🪑 Table: ${table_no.trim()}\n🆔 Order #${orderId}\n`;
-
-    if (customer_name)
-      orderText += isKhmer
-        ? `👤 ឈ្មោះ: ${customer_name}\n`
-        : `👤 Customer: ${customer_name}\n`;
-
-    orderText += `\n📋 ${isKhmer ? "បញ្ជីម្ហូប" : "Items"}:\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n`;
-    items.forEach((item) => {
-      const sub = item.price * item.qty;
-      orderText += `=> ${item.name}\n   ${item.qty} × ${Number(item.price).toLocaleString()} = ${sub.toLocaleString()}៛\n`;
-    });
-    orderText += `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n💰 ${isKhmer ? "សរុបទឹកប្រាក់" : "Total"}: ${total.toLocaleString()}៛\n`;
-    if (note?.trim())
-      orderText += `\n📝 ${isKhmer ? "កំណត់ចំណាំ" : "Note"}: ${note.trim()}\n`;
-    orderText += `\n✅ ${isKhmer ? "សូមរៀបចំម្ហូបនេះផង!" : "Please prepare this order!"}`;
-
-    // Send to Telegram
+    // Send interactive Telegram notification with inline keyboard
     if (restaurant.telegram_chat_id) {
-      const sent = await sendOrderToChat(
+      const sent = await sendOrderNotification(
         restaurant.telegram_chat_id,
-        orderText,
+        {
+          orderId,
+          restaurantName: restaurant.name,
+          tableNo: table_no.trim(),
+          customerName: customer_name || null,
+          items,
+          total,
+          note: note || null,
+          createdAt: new Date(),
+          isKhmer,
+        },
       );
       if (sent) {
         await db.query("UPDATE orders SET telegram_sent = TRUE WHERE id = ?", [
@@ -206,7 +182,6 @@ exports.updateStatus = async (req, res) => {
   const { status } = req.body;
   const allowedStatuses = [
     "pending",
-    "confirmed",
     "preparing",
     "ready",
     "served",

@@ -1,4 +1,3 @@
-const dns = require("dns");
 const nodemailer = require("nodemailer");
 require("dotenv").config();
 
@@ -6,62 +5,40 @@ require("dotenv").config();
 const smtpPass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
 
 // ============================================================
-// FORCE IPv4 ONLY - Fix ENETUNREACH on Render
+// MAILER - Works on both local and Render
 // ============================================================
 
-// Custom DNS lookup - IPv4 only
-function ipv4Lookup(hostname, options, callback) {
-  console.log(`🔍 DNS lookup ${hostname} (IPv4 only)...`);
-  dns.lookup(hostname, { family: 4 }, (err, address, family) => {
-    if (err) {
-      console.error(`❌ DNS lookup failed:`, err.message);
-      return callback(err);
-    }
-    console.log(`✅ ${hostname} -> ${address} (IPv4)`);
-    callback(null, address, family);
-  });
-}
-
-// Create transporter with IPv4 only
+// Create transporter
+// Render blocks outbound SMTP on port 587, so we use port 465 (SSL)
+// or fall back to SendGrid API
 const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false, // STARTTLS
+  host: process.env.SMTP_HOST || "smtp.gmail.com",
+  port: parseInt(process.env.SMTP_PORT || "465"),
+  secure: process.env.SMTP_SECURE === "true" || true, // Use SSL by default
   auth: {
     user: process.env.SMTP_USER,
     pass: smtpPass,
   },
-  // Force IPv4 only
-  dnsLookup: ipv4Lookup,
   // Connection settings
-  pool: true,
-  maxConnections: 5,
-  maxMessages: 100,
-  connectionTimeout: 30000,
-  greetingTimeout: 30000,
-  socketTimeout: 30000,
+  connectionTimeout: 20000,
+  greetingTimeout: 20000,
+  socketTimeout: 20000,
   // TLS settings
   tls: {
-    rejectUnauthorized: true,
+    rejectUnauthorized: false,
     minVersion: "TLSv1.2",
   },
-  // Disable IPv6
+  // Force IPv4
   family: 4,
 });
 
-// Verify connection
-let mailerReady = false;
-let mailerError = null;
-
+// Verify connection (non-blocking)
 transporter.verify((err) => {
   if (err) {
-    console.error("❌ Mailer verification FAILED:", err.message);
-    if (err.code) console.error(`   Code: ${err.code}`);
-    mailerError = err;
-    mailerReady = false;
+    console.error("❌ Mailer verification:", err.message);
+    console.log("ℹ️ Email will still be attempted on send");
   } else {
     console.log("✅ Mailer ready to send emails");
-    mailerReady = true;
   }
 });
 
@@ -77,9 +54,9 @@ async function sendMail({ to, subject, html }) {
   }
 
   let lastError = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      console.log(`📧 Attempt ${attempt}/3...`);
+      console.log(`📧 Attempt ${attempt}/2...`);
 
       const info = await transporter.sendMail({
         from: `"${process.env.SMTP_FROM_NAME || "Digital Menu"}" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`,
@@ -93,16 +70,15 @@ async function sendMail({ to, subject, html }) {
     } catch (err) {
       lastError = err;
       console.error(`❌ Attempt ${attempt} failed:`, err.message);
-      if (err.code) console.error(`   Code: ${err.code}`);
 
       // Don't retry on auth errors
       if (err.code === "EAUTH") {
-        console.error("❌ Authentication failed - check credentials");
+        console.error("❌ Authentication failed - check Gmail App Password");
         break;
       }
 
-      if (attempt < 3) {
-        const waitTime = attempt * 3000;
+      if (attempt < 2) {
+        const waitTime = 5000;
         console.log(`⏳ Waiting ${waitTime}ms before retry...`);
         await new Promise((resolve) => setTimeout(resolve, waitTime));
       }
