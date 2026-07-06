@@ -15,31 +15,34 @@ require("dotenv").config();
 // Strip spaces from app password (Gmail shows it with spaces)
 const smtpPass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT) || 587,
-  secure: process.env.SMTP_SECURE === "true",
-  requireTLS: true,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: smtpPass,
-  },
+function createTransporter(family) {
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT) || 587,
+    secure: process.env.SMTP_SECURE === "true",
+    requireTLS: true,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: smtpPass,
+    },
+    tls: { family },
+    dnsLookup(hostname, options, callback) {
+      return dns.lookup(hostname, { family, all: false }, callback);
+    },
+    connectionTimeout: 20000,
+    greetingTimeout: 10000,
+  });
+}
 
-  tls: {
-    family: 6,
-  },
+const ipv6Transporter = createTransporter(6);
+const ipv4Transporter = createTransporter(4);
 
-  dnsLookup(hostname, options, callback) {
-    return dns.lookup(hostname, { family: 6 }, callback);
-  },
-});
-
-// Verify connection on startup
-transporter.verify((err) => {
+// Verify IPv6 connectivity on startup
+ipv6Transporter.verify((err) => {
   if (err) {
-    console.warn("⚠️ Mailer not configured or connection failed:", err.message);
+    console.warn("⚠️ IPv6 mailer verification failed:", err.message);
   } else {
-    console.log("✅ Mailer ready to send emails");
+    console.log("✅ Mailer ready via IPv6");
   }
 });
 
@@ -56,20 +59,34 @@ async function sendMail({ to, subject, html }) {
     return { messageId: "dev-mode" };
   }
 
-  try {
-    const info = await transporter.sendMail({
-      from: `"${process.env.SMTP_FROM_NAME || "Digital Menu"}" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`,
-      to,
-      subject,
-      html,
-    });
+  let activeTransporter = ipv6Transporter;
 
+  const mailOptions = {
+    from: `"${process.env.SMTP_FROM_NAME || "Digital Menu"}" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`,
+    to,
+    subject,
+    html,
+  };
+
+  try {
+    const info = await activeTransporter.sendMail(mailOptions);
     console.log(`📧 Email sent to ${to}: ${info.messageId}`);
     return info;
   } catch (err) {
+    // If IPv6 fails, fallback to IPv4 for this send
+    if (activeTransporter === ipv6Transporter && /ENETUNREACH|ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH/.test(err.message)) {
+      console.warn(`⚠️ IPv6 failed for ${to}, retrying via IPv4:`, err.message);
+      activeTransporter = ipv4Transporter;
+      try {
+        const info = await ipv4Transporter.sendMail(mailOptions);
+        console.log(`📧 Email sent to ${to} (IPv4 fallback): ${info.messageId}`);
+        return info;
+      } catch (err2) {
+        console.error(`📧 Failed to send email to ${to}:`, err2.message);
+        return { messageId: "fallback" };
+      }
+    }
     console.error(`📧 Failed to send email to ${to}:`, err.message);
-    // Don't throw - return a dev-mode fallback so the app still works
-    console.log(`📧 [FALLBACK] Email to ${to}: ${subject}`);
     return { messageId: "fallback" };
   }
 }
