@@ -2,73 +2,58 @@ const dns = require("dns");
 const nodemailer = require("nodemailer");
 require("dotenv").config();
 
-// Strip spaces from app password (Gmail shows it with spaces)
+// Strip spaces from app password
 const smtpPass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
 
 // ============================================================
-// OPTION 1: Use port 587 with STARTTLS (Recommended for Gmail)
+// FORCE IPv4 ONLY - Fix ENETUNREACH on Render
 // ============================================================
+
+// Create a custom DNS lookup function that ONLY uses IPv4
+function ipv4Lookup(hostname, options, callback) {
+  // Force family: 4 to only use IPv4
+  dns.lookup(hostname, { family: 4 }, (err, address, family) => {
+    if (err) {
+      console.error(`DNS lookup failed for ${hostname}:`, err.message);
+      return callback(err);
+    }
+    console.log(`DNS resolved ${hostname} -> ${address} (IPv4)`);
+    callback(null, address, family);
+  });
+}
+
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: 587, // Use 587 instead of 465
-  secure: false, // false for port 587 (STARTTLS)
+  port: 587,
+  secure: false, // STARTTLS
   auth: {
     user: process.env.SMTP_USER,
     pass: smtpPass,
   },
-  // IPv4-only DNS to avoid ENETUNREACH on Render
-  dnsLookup(hostname, options, callback) {
-    return dns.lookup(hostname, { family: 4 }, callback);
-  },
-  // Connection pooling for faster subsequent sends
+  // Force IPv4 only
+  dnsLookup: ipv4Lookup,
+  // Connection pooling
   pool: true,
   maxConnections: 5,
   maxMessages: 100,
-  // Additional TLS options for Gmail
+  // TLS configuration
   tls: {
     rejectUnauthorized: true,
     minVersion: "TLSv1.2",
   },
+  // Timeout settings
+  connectionTimeout: 30000, // 30 seconds
+  greetingTimeout: 30000,
+  socketTimeout: 30000,
 });
-
-// ============================================================
-// OPTION 2: Use port 465 with SSL (Alternative)
-// Uncomment this block if you want to use 465
-// ============================================================
-/*
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: 465,
-  secure: true,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: smtpPass,
-  },
-  dnsLookup(hostname, options, callback) {
-    return dns.lookup(hostname, { family: 4 }, callback);
-  },
-  pool: true,
-  maxConnections: 5,
-  maxMessages: 100,
-  tls: {
-    rejectUnauthorized: false,  // Sometimes needed on Render
-  },
-});
-*/
-
-// ============================================================
-// OPTION 3: Use port 25 (Not recommended for Gmail)
-// ============================================================
 
 // Verify connection
 let mailerReady = false;
 let mailerError = null;
 
-// Verify connection
 transporter.verify((err) => {
   if (err) {
     console.error("❌ Mailer verification FAILED:", err.message);
-    // Log more details
     if (err.code) console.error(`   Code: ${err.code}`);
     if (err.stack) console.error(`   Stack: ${err.stack}`);
     mailerError = err;
@@ -80,13 +65,13 @@ transporter.verify((err) => {
 });
 
 /**
- * Send an email
+ * Send an email with retry logic
  */
 async function sendMail({ to, subject, html }) {
-  // Log configuration for debugging
   console.log(`📧 Sending email to: ${to}`);
   console.log(`   Using host: ${process.env.SMTP_HOST}, port: 587`);
 
+  // Check if SMTP is configured
   if (
     !process.env.SMTP_HOST ||
     !process.env.SMTP_USER ||
@@ -99,23 +84,43 @@ async function sendMail({ to, subject, html }) {
     return { messageId: "dev-mode" };
   }
 
-  try {
-    const info = await transporter.sendMail({
-      from: `"${process.env.SMTP_FROM_NAME || "Digital Menu"}" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`,
-      to,
-      subject,
-      html,
-    });
+  // Try to send with retry
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      console.log(`📧 Attempt ${attempt}/3 to send email to ${to}...`);
 
-    console.log(`✅ Email sent to ${to}: ${info.messageId}`);
-    return info;
-  } catch (err) {
-    console.error(`❌ Failed to send email to ${to}:`, err.message);
-    if (err.code) console.error(`   Code: ${err.code}`);
-    if (err.response) console.error(`   Response: ${err.response}`);
-    // Don't throw, just return error object
-    return { error: err.message, messageId: "failed" };
+      const info = await transporter.sendMail({
+        from: `"${process.env.SMTP_FROM_NAME || "Digital Menu"}" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`,
+        to,
+        subject,
+        html,
+      });
+
+      console.log(`✅ Email sent to ${to}: ${info.messageId}`);
+      return info;
+    } catch (err) {
+      lastError = err;
+      console.error(`❌ Attempt ${attempt} failed:`, err.message);
+      if (err.code) console.error(`   Code: ${err.code}`);
+
+      // Don't retry on certain errors
+      if (err.code === "EAUTH") {
+        console.error("❌ Authentication failed - check SMTP password");
+        break;
+      }
+
+      // Wait before retry (exponential backoff)
+      if (attempt < 3) {
+        const waitTime = attempt * 2000;
+        console.log(`⏳ Waiting ${waitTime}ms before retry...`);
+        await new Promise((resolve) => setTimeout(resolve, waitTime));
+      }
+    }
   }
+
+  console.error(`❌ All attempts failed for ${to}`);
+  return { error: lastError?.message || "Unknown error", messageId: "failed" };
 }
 
 module.exports = { sendMail };
