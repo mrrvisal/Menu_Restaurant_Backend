@@ -1,42 +1,28 @@
 const dns = require("dns");
-
-// Prefer IPv4 DNS results to avoid ENETUNREACH on hosts without IPv6 routing
-if (typeof dns.setDefaultResultOrder === "function") {
-  try {
-    dns.setDefaultResultOrder("ipv4first");
-  } catch (e) {
-    // ignore if not supported on this Node version
-  }
-}
-// backend/config/mailer.js
 const nodemailer = require("nodemailer");
 require("dotenv").config();
 
 // Strip spaces from app password (Gmail shows it with spaces)
 const smtpPass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
 
+// Force IPv4-only transport to avoid ENETUNREACH on Render's IPv6-blocked instances
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
-  port: 465,
-  secure: true,
+  port: Number(process.env.SMTP_PORT),
+  secure: process.env.SMTP_SECURE === "true",
   auth: {
     user: process.env.SMTP_USER,
     pass: smtpPass,
   },
-
-  // Force A records only so we never touch IPv6 egress on Render
-  dnsLookup(hostname, options, callback) {
-    return dns.resolve4(hostname, (err, addresses) => {
-      if (err) return callback(err);
-      return callback(null, addresses[0], 4);
-    });
+  lookup(hostname, options, callback) {
+    dns.lookup(hostname, { family: 4 }, callback);
   },
 });
 
 // Verify connection on startup
 transporter.verify((err) => {
   if (err) {
-    console.warn("⚠️ Mailer not configured or connection failed:", err.message);
+    console.warn("⚠️ Mailer not configured or connection failed:", err);
   } else {
     console.log("✅ Mailer ready to send emails");
   }
