@@ -17,20 +17,19 @@ const smtpPass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT) || 587,
-  secure: process.env.SMTP_SECURE === "true",
-  requireTLS: true,
+  port: 465,
+  secure: true,
   auth: {
     user: process.env.SMTP_USER,
     pass: smtpPass,
   },
 
-  tls: {
-    family: 4,
-  },
-
+  // Force A records only so we never touch IPv6 egress on Render
   dnsLookup(hostname, options, callback) {
-    return dns.lookup(hostname, { family: 4 }, callback);
+    return dns.resolve4(hostname, (err, addresses) => {
+      if (err) return callback(err);
+      return callback(null, addresses[0], 4);
+    });
   },
 });
 
