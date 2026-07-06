@@ -1,4 +1,13 @@
 const dns = require("dns");
+
+// Prefer IPv4 DNS results to avoid ENETUNREACH on hosts without IPv6 routing
+if (typeof dns.setDefaultResultOrder === "function") {
+  try {
+    dns.setDefaultResultOrder("ipv4first");
+  } catch (e) {
+    // ignore if not supported on this Node version
+  }
+}
 // backend/config/mailer.js
 const nodemailer = require("nodemailer");
 require("dotenv").config();
