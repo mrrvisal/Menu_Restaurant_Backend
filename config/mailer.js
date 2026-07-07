@@ -1,72 +1,65 @@
 // ============================================================
-// MAILER - Gmail SMTP via nodemailer
+// MAILER - Brevo (SendinBlue) API (works on Render + local)
 // ============================================================
-// Works locally and on Render (Render blocks SMTP ports 587/465,
-// but for production on Render, use Brevo API instead).
+// Brevo sends via HTTPS API on port 443 which Render allows.
+// Free tier: 300 emails/day.
+// Sign up: https://app.brevo.com
 // ============================================================
 
-const nodemailer = require("nodemailer");
+const brevo = require("@getbrevo/brevo");
 require("dotenv").config();
 
-const smtpPass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const isProd = process.env.NODE_ENV === "production" || !!process.env.RENDER;
 
-// Configure nodemailer transporter
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: parseInt(process.env.SMTP_PORT || "587"),
-  secure: process.env.SMTP_SECURE === "true",
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: smtpPass,
-  },
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 10000,
-  tls: {
-    rejectUnauthorized: false,
-    minVersion: "TLSv1.2",
-  },
-  family: 4,
-});
+// Initialize Brevo API client
+let brevoClient = null;
+if (BREVO_API_KEY) {
+  brevoClient = new brevo.BrevoClient({ apiKey: BREVO_API_KEY });
+  console.log("✅ Brevo configured");
+}
 
 /**
- * Send email using nodemailer (Gmail SMTP)
+ * Send email using Brevo API
  */
 async function sendMail({ to, subject, html }) {
   console.log(`📧 Sending email to: ${to}`);
 
-  // Skip if no credentials configured
-  if (!process.env.SMTP_USER || !smtpPass) {
+  // Skip if no API key configured
+  if (!BREVO_API_KEY) {
     console.log(`📧 [DEV] Email to ${to}: ${subject}`);
     return { messageId: "dev-mode" };
   }
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      console.log(`📧 nodemailer attempt ${attempt}/2...`);
-      const info = await transporter.sendMail({
-        from: `"${process.env.SMTP_FROM_NAME || "Digital Menu"}" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`,
-        to,
-        subject,
-        html,
-      });
-      console.log(`✅ Email sent via nodemailer: ${info.messageId}`);
-      return info;
-    } catch (err) {
-      console.error(`❌ nodemailer attempt ${attempt} failed:`, err.message);
-      if (err.code === "EAUTH") {
-        console.error("❌ Authentication failed - check Gmail App Password");
-        break;
-      }
-      if (attempt < 2) {
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+  try {
+    console.log("📧 Using Brevo API...");
+    const response = await brevoClient.transactionalEmails.sendTransacEmail({
+      subject,
+      htmlContent: html,
+      sender: {
+        name: process.env.BREVO_FROM_NAME || "Digital Menu",
+        email: process.env.BREVO_FROM_EMAIL || "noreply@digitalmenu.com",
+      },
+      to: [{ email: to }],
+    });
+
+    console.log(`✅ Email sent via Brevo to ${to}`);
+    return { messageId: response.body?.messageId || "sent" };
+  } catch (err) {
+    console.error("❌ Brevo failed:", err.message);
+    if (err.body) {
+      try {
+        const errorBody = typeof err.body === "string" ? JSON.parse(err.body) : err.body;
+        console.error("   Details:", errorBody.message || err.body);
+      } catch {
+        console.error("   Body:", String(err.body).slice(0, 300));
       }
     }
+    if (isProd) {
+      return { error: "Brevo failed", messageId: "failed" };
+    }
+    return { error: err.message, messageId: "failed" };
   }
-
-  console.error(`❌ Failed to send email to ${to}`);
-  return { error: "All methods failed", messageId: "failed" };
 }
 
 module.exports = { sendMail };
