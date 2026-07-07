@@ -22,7 +22,7 @@ function getBot() {
   bot.start(async (ctx) => {
     const firstName = ctx.from?.first_name || "";
     await ctx.reply(
-      `👋 សូមស្វាគមន៍ ${firstName}!\n\n` +
+      `👋 សូមស្វាគមន៍មកកាន់ Digital Menu!\n\n` +
         `ដើម្បីភ្ជាប់គណនីភោជនីយដ្ឋានរបស់អ្នក សូមប្រើពាក្យបញ្ជា៖\n\n` +
         `/link លេខកូដភ្ជាប់\n\n` +
         `ឧទាហរណ៍: /link ABC123\n\n` +
