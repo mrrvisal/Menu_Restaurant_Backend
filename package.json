@@ -8,6 +8,7 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
+    "@getbrevo/brevo": "^6.0.2",
     "@sendgrid/mail": "^8.1.6",
     "axios": "^1.16.0",
     "bcrypt": "^6.0.0",
@@ -21,6 +22,7 @@
     "mysql2": "^3.6.5",
     "nodemailer": "^9.0.3",
     "qrcode": "^1.5.4",
+    "resend": "^6.17.1",
     "sharp": "^0.35.2",
     "telegraf": "^4.16.3"
   },
