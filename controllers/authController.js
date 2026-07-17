@@ -87,11 +87,11 @@ exports.register = async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const linkCode = await generateLinkCode();
 
-    // Create user (owner) — active immediately, no email verification required
+    // Create user (owner) — inactive until email is verified
     const [userResult] = await db.query(
-      `INSERT INTO users (email, password, full_name, role, status, email_verify_token)
-       VALUES (?, ?, ?, 'owner', 'active', ?)`,
-      [email.trim(), hashedPassword, fullName || "", verifyToken],
+      `INSERT INTO users (email, password, role, status, email_verify_token)
+       VALUES (?, ?, 'owner', 'inactive', ?)`,
+      [email.trim(), hashedPassword || "", verifyToken],
     );
     const userId = userResult.insertId;
 
@@ -142,29 +142,12 @@ exports.register = async (req, res) => {
       `,
     }).catch(err => console.error("Background email send failed:", err.message));
 
-    const token = generateToken({
-      id: userId,
-      email: email.trim(),
-      role: "owner",
-    });
-
+    // Don't return a token — user must verify email first
     res.status(201).json({
-      token,
-      user: {
-        id: userId,
-        email: email.trim(),
-        role: "owner",
-        fullName: fullName || "",
-      },
-      restaurant: {
-        id: restaurantId,
-        name: restaurantName.trim(),
-        logoUrl,
-        telegramChatId: null,
-        telegramLinkCode: linkCode,
-        defaultLanguage: "km",
-      },
-      message: "Registration successful!",
+      token: null,
+      user: null,
+      restaurant: null,
+      message: "Registration successful! Please check your email to verify your account.",
     });
   } catch (err) {
     console.error("Register error:", err);
@@ -217,7 +200,6 @@ exports.login = async (req, res) => {
         id: user.id,
         email: user.email,
         role: user.role,
-        fullName: user.full_name,
         emailVerified: !!user.email_verified_at,
       },
       restaurant: user.restaurant_id
@@ -259,6 +241,66 @@ exports.verifyEmail = async (req, res) => {
     res.json({ message: "Email verified successfully! You can now log in." });
   } catch (err) {
     console.error("Verify email error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// ─── RESEND VERIFICATION EMAIL ─────────────────────────────
+exports.resendVerification = async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: "Email is required" });
+
+  try {
+    const [rows] = await db.query(
+      "SELECT id, email, email_verified_at FROM users WHERE email = ? AND role = 'owner'",
+      [email.trim()],
+    );
+    if (!rows.length)
+      return res.status(404).json({ error: "No account found with this email" });
+    if (rows[0].email_verified_at)
+      return res.status(400).json({ error: "Email already verified" });
+
+    const verifyToken = crypto.randomBytes(32).toString("hex");
+    await db.query(
+      "UPDATE users SET email_verify_token = ? WHERE id = ?",
+      [verifyToken, rows[0].id],
+    );
+
+    const verifyUrl = `${FRONTEND_URL}/verify-email?token=${verifyToken}`;
+    sendMail({
+      to: email.trim(),
+      subject: "Verify your email - Digital Menu",
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+          <div style="text-align: center; margin-bottom: 24px;">
+            <div style="width: 48px; height: 48px; background: #166534; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center;">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+            </div>
+          </div>
+          <h2 style="color: #14532d; text-align: center; margin-bottom: 16px;">Verify your email address</h2>
+          <p style="color: #4a6650; line-height: 1.6; margin-bottom: 20px;">
+            Click the button below to verify your email address and activate your Digital Menu account.
+          </p>
+          <div style="text-align: center; margin-bottom: 24px;">
+            <a href="${verifyUrl}" style="display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #166534, #22c55e); color: white; text-decoration: none; border-radius: 10px; font-weight: 700; font-size: 14px;">
+              Verify Email Address
+            </a>
+          </div>
+          <p style="color: #6b7280; font-size: 12px; text-align: center;">
+            Or copy this link into your browser:<br/>
+            <a href="${verifyUrl}" style="color: #22c55e; word-break: break-all;">${verifyUrl}</a>
+          </p>
+          <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;" />
+          <p style="color: #9ca3af; font-size: 11px; text-align: center;">
+            This link expires in 24 hours. If you didn't request this, please ignore this email.
+          </p>
+        </div>
+      `,
+    }).catch(err => console.error("Background email send failed:", err.message));
+
+    res.json({ message: "Verification email has been sent. Please check your inbox." });
+  } catch (err) {
+    console.error("Resend verification error:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -373,7 +415,7 @@ exports.resetPassword = async (req, res) => {
 exports.me = async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT u.id, u.email, u.full_name, u.role, u.email_verified_at, u.status, u.created_at,
+      `SELECT u.id, u.email, u.role, u.email_verified_at, u.status, u.created_at,
               r.id AS restaurant_id, r.name AS restaurant_name,
               r.logo_url, r.telegram_chat_id, r.telegram_link_code, r.default_language
        FROM users u
@@ -389,7 +431,6 @@ exports.me = async (req, res) => {
         id: user.id,
         email: user.email,
         role: user.role,
-        fullName: user.full_name,
         emailVerified: !!user.email_verified_at,
         status: user.status,
         createdAt: user.created_at,

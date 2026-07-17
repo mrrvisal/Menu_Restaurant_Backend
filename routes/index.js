@@ -51,6 +51,7 @@ router.get("/restaurants/:id", ordersCtrl.getRestaurant);
 router.post("/auth/register", upload.single("logo"), authCtrl.register);
 router.post("/auth/login", authCtrl.login);
 router.get("/auth/verify-email", authCtrl.verifyEmail);
+router.post("/auth/resend-verification", authCtrl.resendVerification);
 router.post("/auth/forgot-password", authCtrl.forgotPassword);
 router.post("/auth/reset-password", authCtrl.resetPassword);
 router.get("/auth/me", auth, authCtrl.me);
@@ -110,7 +111,7 @@ router.patch(
 router.get("/admin/users", auth, requireSuperAdmin, async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT u.id, u.email, u.full_name, u.role, u.status, u.email_verified_at, u.last_login_at, u.created_at,
+      `SELECT u.id, u.email, u.role, u.status, u.email_verified_at, u.last_login_at, u.created_at,
               r.name AS restaurant_name
        FROM users u
        LEFT JOIN restaurants r ON r.owner_id = u.id
@@ -118,6 +119,7 @@ router.get("/admin/users", auth, requireSuperAdmin, async (req, res) => {
     );
     res.json(rows);
   } catch (err) {
+    console.error("Admin users fetch error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -138,6 +140,106 @@ router.patch(
       ]);
       res.json({ success: true });
     } catch (err) {
+      res.status(500).json({ error: "Server error" });
+    }
+  },
+);
+
+// Super Admin: Manually verify a user's email
+router.post(
+  "/admin/users/:id/verify",
+  auth,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const [rows] = await db.query(
+        "SELECT id, email, email_verified_at FROM users WHERE id = ?",
+        [req.params.id],
+      );
+      if (!rows.length) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      if (rows[0].email_verified_at) {
+        return res.json({ success: true, message: "Email already verified" });
+      }
+      await db.query(
+        "UPDATE users SET email_verified_at = NOW(), email_verify_token = NULL, status = 'active' WHERE id = ?",
+        [req.params.id],
+      );
+      res.json({ success: true, message: "User email verified successfully" });
+    } catch (err) {
+      console.error("Admin verify user error:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  },
+);
+
+// Super Admin: Resend verification email to a user
+router.post(
+  "/admin/users/:id/resend-verification",
+  auth,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const [rows] = await db.query(
+        "SELECT id, email, email_verified_at FROM users WHERE id = ?",
+        [req.params.id],
+      );
+      if (!rows.length) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      const user = rows[0];
+      if (user.email_verified_at) {
+        return res.json({ success: true, message: "Email already verified" });
+      }
+
+      // Generate new verification token
+      const crypto = require("crypto");
+      const verifyToken = crypto.randomBytes(32).toString("hex");
+      await db.query(
+        "UPDATE users SET email_verify_token = ? WHERE id = ?",
+        [verifyToken, user.id],
+      );
+
+      // Send verification email
+      const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+      const verifyUrl = `${FRONTEND_URL}/verify-email?token=${verifyToken}`;
+      const { sendMail } = require("../config/mailer");
+      sendMail({
+        to: user.email,
+        subject: "Verify your email - Digital Menu",
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+            <div style="text-align: center; margin-bottom: 24px;">
+              <div style="width: 48px; height: 48px; background: #166534; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center;">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+              </div>
+            </div>
+            <h2 style="color: #14532d; text-align: center; margin-bottom: 16px;">Email Verification</h2>
+            <p style="color: #4a6650; line-height: 1.6; margin-bottom: 20px;">
+              Hello${user.full_name ? " " + user.full_name : ""},<br/><br/>
+              An administrator has requested you to verify your email address. Please click the button below to verify.
+            </p>
+            <div style="text-align: center; margin-bottom: 24px;">
+              <a href="${verifyUrl}" style="display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #166534, #22c55e); color: white; text-decoration: none; border-radius: 10px; font-weight: 700; font-size: 14px;">
+                Verify Email Address
+              </a>
+            </div>
+            <p style="color: #6b7280; font-size: 12px; text-align: center;">
+              Or copy this link into your browser:<br/>
+              <a href="${verifyUrl}" style="color: #22c55e; word-break: break-all;">${verifyUrl}</a>
+            </p>
+            <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;" />
+            <p style="color: #9ca3af; font-size: 11px; text-align: center;">
+              This link expires when a new verification is requested. If you didn't expect this email, please ignore it.
+            </p>
+          </div>
+        `,
+      }).catch(err => console.error("Background email send failed:", err.message));
+
+      res.json({ success: true, message: "Verification email sent" });
+    } catch (err) {
+      console.error("Admin resend verification error:", err);
       res.status(500).json({ error: "Server error" });
     }
   },
