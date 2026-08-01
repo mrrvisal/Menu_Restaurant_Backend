@@ -1,6 +1,7 @@
 // backend/controllers/ordersController.js
 const db = require("../config/db");
 const { sendOrderNotification } = require("../services/telegramBot");
+const { broadcast } = require("../services/sse");
 
 // POST /api/orders - Place order (guest)
 exports.create = async (req, res) => {
@@ -43,6 +44,17 @@ exports.create = async (req, res) => {
     );
     const orderId = orderResult.insertId;
     const isKhmer = restaurant.default_language === "km";
+
+    // 🔔 Real-time SSE broadcast for new order alert
+    broadcast(restId, "new-order", {
+      orderId,
+      tableNo: table_no.trim(),
+      customerName: customer_name || null,
+      items,
+      total,
+      note: note || null,
+      createdAt: new Date(),
+    });
 
     // Send interactive Telegram notification with inline keyboard
     if (restaurant.telegram_chat_id) {
@@ -202,6 +214,20 @@ exports.updateStatus = async (req, res) => {
       status,
       req.params.id,
     ]);
+
+    // 🔔 Real-time SSE broadcast for order status change
+    const [orderRows] = await db.query(
+      "SELECT restaurant_id, table_no FROM orders WHERE id = ?",
+      [req.params.id],
+    );
+    if (orderRows.length) {
+      broadcast(orderRows[0].restaurant_id, "order-status", {
+        orderId: parseInt(req.params.id),
+        status,
+        tableNo: orderRows[0].table_no,
+      });
+    }
+
     res.json({ success: true, id: parseInt(req.params.id), status });
   } catch (err) {
     res.status(500).json({ error: "Server error" });

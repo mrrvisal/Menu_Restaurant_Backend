@@ -16,6 +16,7 @@ const foodsCtrl = require("../controllers/foodsController");
 const catsCtrl = require("../controllers/categoriesController");
 const ordersCtrl = require("../controllers/ordersController");
 const telegramCtrl = require("../controllers/telegramController");
+const { addClient } = require("../services/sse");
 const db = require("../config/db");
 
 // ─── FILE UPLOAD CONFIG ────────────────────────────────────
@@ -98,6 +99,57 @@ router.delete("/foods/:id", auth, requireOwnerOrAdmin, foodsCtrl.remove);
 
 // ─── ORDERS (public create, owner/super_admin view) ────────
 router.post("/orders", ordersCtrl.create);
+
+// ─── ORDER SSE STREAM (real-time new order alerts) ─────────
+router.get("/orders/stream", (req, res, next) => {
+  // EventSource (native browser API) can't set custom headers,
+  // so also accept the JWT token as a query parameter.
+  if (req.query.token) {
+    req.headers.authorization = `Bearer ${req.query.token}`;
+  }
+  auth(req, res, () => requireOwnerOrAdmin(req, res, next));
+}, (req, res) => {
+  // Determine restaurant id from user
+  const fetchRestaurant = () =>
+    db.query(
+      "SELECT id FROM restaurants WHERE owner_id = ? LIMIT 1",
+      [req.user.id],
+    );
+
+  fetchRestaurant().then(([rows]) => {
+    if (!rows.length) {
+      return res.status(404).json({ error: "Restaurant not found" });
+    }
+    const restaurantId = rows[0].id;
+
+    // Headers for SSE
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+
+    // Send initial heartbeat so client knows the stream is live
+    res.write(`event: connected\ndata: {"message":"stream connected"}\n\n`);
+
+    // Periodic keep-alive comment (prevents proxy timeouts)
+    const heartbeat = setInterval(() => {
+      res.write(`: heartbeat\n\n`);
+    }, 25000);
+
+    // Register this client
+    addClient(restaurantId, res);
+
+    // Cleanup interval on close
+    res.on("close", () => {
+      clearInterval(heartbeat);
+    });
+  }).catch((err) => {
+    console.error("SSE setup error:", err);
+    res.status(500).json({ error: "Server error" });
+  });
+});
 router.get("/orders", auth, requireOwnerOrAdmin, ordersCtrl.getAll);
 router.get("/orders/stats", auth, requireOwnerOrAdmin, ordersCtrl.stats);
 router.patch(
@@ -288,30 +340,60 @@ const {
 
 router.get("/qr/table/:number", softAuth, async (req, res) => {
   try {
-    const tableNumber = req.params.number;
+    const tableNumber = parseInt(req.params.number);
     if (!tableNumber || isNaN(tableNumber))
       return res.status(400).json({ error: "Invalid table number" });
 
     let restaurantId = null;
-    if (req.query.restaurant_id) restaurantId = req.query.restaurant_id;
+    if (req.query.restaurant_id) restaurantId = parseInt(req.query.restaurant_id);
     else if (req.user) {
       const [rows] = await db.query(
         "SELECT id FROM restaurants WHERE owner_id = ?",
         [req.user.id],
       );
-      if (rows.length) restaurantId = String(rows[0].id);
+      if (rows.length) restaurantId = rows[0].id;
+    }
+
+    // 🔍 Check if QR code already exists for this restaurant + table
+    if (restaurantId) {
+      const [existing] = await db.query(
+        "SELECT qr_data_url, qr_url, created_at FROM qr_codes WHERE restaurant_id = ? AND table_no = ?",
+        [restaurantId, tableNumber],
+      );
+      if (existing.length) {
+        return res.json({
+          success: true,
+          tableNumber,
+          qrCode: existing[0].qr_data_url,
+          url: existing[0].qr_url,
+          alreadyExists: true,
+          createdAt: existing[0].created_at,
+        });
+      }
     }
 
     const frontendUrl =
       process.env.FRONTEND_URL || `${req.protocol}://${req.get("host")}`;
     let qrUrl = `${frontendUrl}/menu?table=${tableNumber}`;
     if (restaurantId) {
-      const encryptedToken = encryptRestaurantId(restaurantId);
+      const encryptedToken = encryptRestaurantId(String(restaurantId));
       qrUrl += `&rid=${encodeURIComponent(encryptedToken)}`;
     }
 
     const darkColor = "#2d5a27";
     const lightColor = "#f5f0e8";
+
+    // 🏪 Get restaurant logo (if any) for QR code
+    let restaurantLogo = null;
+    if (restaurantId) {
+      const [restRows] = await db.query(
+        "SELECT logo_url FROM restaurants WHERE id = ?",
+        [restaurantId],
+      );
+      if (restRows.length && restRows[0].logo_url) {
+        restaurantLogo = restRows[0].logo_url;
+      }
+    }
 
     if (req.query.format === "png") {
       const pngBuffer = await generateQrWithLogo(qrUrl, {
@@ -319,6 +401,8 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
         margin: 2,
         darkColor,
         lightColor,
+        logoUrl: restaurantLogo,
+        tableText: `តុលេខ ${tableNumber}`,
       });
       res.setHeader("Content-Type", "image/png");
       res.setHeader(
@@ -333,16 +417,67 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
       margin: 2,
       darkColor,
       lightColor,
+      logoUrl: restaurantLogo,
+      tableText: `តុលេខ ${tableNumber}`,
     });
     const qrCodeDataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
 
+    // 💾 Store the QR code in the database to prevent duplicates
+    if (restaurantId) {
+      await db.query(
+        `INSERT INTO qr_codes (restaurant_id, table_no, qr_url, qr_data_url)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE qr_url = VALUES(qr_url), qr_data_url = VALUES(qr_data_url)`,
+        [restaurantId, tableNumber, qrUrl, qrCodeDataUrl],
+      );
+    }
+
     res.json({
       success: true,
-      tableNumber: parseInt(tableNumber),
+      tableNumber,
       qrCode: qrCodeDataUrl,
       url: qrUrl,
+      alreadyExists: false,
     });
   } catch (error) {
+    console.error("QR generation error:", error.message);
+    // If qr_codes table doesn't exist yet, fall back to just generating
+    if (error.code === "ER_NO_SUCH_TABLE") {
+      try {
+        const tableNumber = parseInt(req.params.number);
+        const frontendUrl =
+          process.env.FRONTEND_URL || `${req.protocol}://${req.get("host")}`;
+        let qrUrl = `${frontendUrl}/menu?table=${tableNumber}`;
+        let restaurantId = req.query.restaurant_id || (req.user ? null : null);
+        if (req.user) {
+          const [rows] = await db.query(
+            "SELECT id FROM restaurants WHERE owner_id = ?",
+            [req.user.id],
+          );
+          if (rows.length) {
+            restaurantId = rows[0].id;
+            const encryptedToken = encryptRestaurantId(String(restaurantId));
+            qrUrl += `&rid=${encodeURIComponent(encryptedToken)}`;
+          }
+        }
+        const pngBuffer = await generateQrWithLogo(qrUrl, {
+          width: 500,
+          margin: 2,
+          darkColor: "#2d5a27",
+          lightColor: "#f5f0e8",
+        });
+        const qrCodeDataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
+        return res.json({
+          success: true,
+          tableNumber,
+          qrCode: qrCodeDataUrl,
+          url: qrUrl,
+          alreadyExists: false,
+        });
+      } catch (fallbackErr) {
+        return res.status(500).json({ error: "Failed to generate QR code" });
+      }
+    }
     res.status(500).json({ error: "Failed to generate QR code" });
   }
 });

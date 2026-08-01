@@ -3,6 +3,7 @@
 
 const { Telegraf, Markup } = require("telegraf");
 const db = require("../config/db");
+const { broadcast } = require("./sse");
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 let bot = null;
@@ -185,6 +186,19 @@ function getBot() {
         newStatus,
         orderId,
       ]);
+
+      // 🔔 Real-time SSE broadcast for order status change (from Telegram)
+      const [orderRows] = await db.query(
+        "SELECT restaurant_id, table_no FROM orders WHERE id = ?",
+        [orderId],
+      );
+      if (orderRows.length) {
+        broadcast(orderRows[0].restaurant_id, "order-status", {
+          orderId,
+          status: newStatus,
+          tableNo: orderRows[0].table_no,
+        });
+      }
 
       // Update the inline keyboard message
       const newKeyboard = buildOrderStatusKeyboard(orderId, newStatus);

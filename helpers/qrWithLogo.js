@@ -5,18 +5,6 @@ const crypto = require("crypto");
 const QR_SECRET =
   process.env.QR_SECRET || "fallback-qr-secret-change-in-production";
 
-/**
- * Generate a QR code PNG buffer with a center logo and natural color palette.
- *
- * @param {string}  data          - The URL or text to encode in the QR
- * @param {object}  [opts]
- * @param {number}  [opts.width=500]
- * @param {number}  [opts.margin=2]
- * @param {string}  [opts.logoUrl] - URL of the logo image to overlay (optional)
- * @param {string}  [opts.darkColor="#2d5a27"] - Dark module colour (earthy green)
- * @param {string}  [opts.lightColor="#f5f0e8"] - Light module colour (warm cream)
- * @returns {Promise<Buffer>} PNG buffer
- */
 function encryptRestaurantId(restaurantId) {
   const iv = crypto.randomBytes(16);
   const key = Buffer.from(QR_SECRET.padEnd(32).slice(0, 32));
@@ -50,74 +38,85 @@ async function generateQrWithLogo(data, opts = {}) {
   const {
     width = 500,
     margin = 2,
-    logoUrl = process.env.LOGO_URL ||
-      "https://res.cloudinary.com/daji2ml3y/image/upload/v1783262055/ChatGPT_Image_Jul_5_2026_09_32_32_PM_c6ziic.png",
-    darkColor = "#2d5a27", // natural deep green
-    lightColor = "#f5f0e8", // warm cream
+    logoUrl = "https://res.cloudinary.com/daji2ml3y/image/upload/v1783262055/ChatGPT_Image_Jul_5_2026_09_32_32_PM_c6ziic.png",
+    darkColor = "#2d5a27",
+    lightColor = "#f5f0e8",
+    tableText = "",
   } = opts;
 
-  // 1. Generate plain QR (with natural colours)
   const qrBuffer = await QRCode.toBuffer(data, {
     width,
     margin,
     color: { dark: darkColor, light: lightColor },
-    // errorCorrectionLevel must be high so the logo doesn't break scanning
     errorCorrectionLevel: "H",
   });
 
-  // 2. Resize logo to ~22 % of QR width (good balance)
   const logoSize = Math.round(width * 0.22);
-  // Round corners on logo
   const cornerRadius = Math.round(logoSize * 0.15);
+  let finalBuffer = qrBuffer;
 
-  // 3. Fetch & composite logo in the centre
-  let logoComposite;
+  if (logoUrl) {
+    let logoComposite;
 
-  try {
-    const logoResp = await fetch(logoUrl);
-    if (!logoResp.ok) throw new Error(`HTTP ${logoResp.status}`);
-    const logoBuffer = Buffer.from(await logoResp.arrayBuffer());
+    try {
+      const logoResp = await fetch(logoUrl);
+      if (!logoResp.ok) throw new Error(`HTTP ${logoResp.status}`);
+      const logoBuffer = Buffer.from(await logoResp.arrayBuffer());
 
-    // Resize, add rounded corners & a subtle white border/stroke
-    const logoRounded = await sharp(logoBuffer)
-      .resize(logoSize, logoSize, {
-        fit: "contain",
-        background: { r: 0, g: 0, b: 0, alpha: 0 },
-      })
+      const logoRounded = await sharp(logoBuffer)
+        .resize(logoSize, logoSize, {
+          fit: "contain",
+          background: { r: 0, g: 0, b: 0, alpha: 0 },
+        })
+        .composite([
+          {
+            input: Buffer.from(
+              `<svg width="${logoSize}" height="${logoSize}"><rect x="0" y="0" width="${logoSize}" height="${logoSize}" rx="${cornerRadius}" ry="${cornerRadius}" fill="white"/></svg>`,
+            ),
+            blend: "dest-over",
+          },
+        ])
+        .png()
+        .toBuffer();
+
+      logoComposite = {
+        input: logoRounded,
+        top: Math.round((width - logoSize) / 2),
+        left: Math.round((width - logoSize) / 2),
+      };
+
+      finalBuffer = await sharp(qrBuffer)
+        .composite([logoComposite])
+        .png()
+        .toBuffer();
+    } catch {
+      finalBuffer = qrBuffer;
+    }
+  }
+
+  if (tableText) {
+    const textHeight = Math.round(width * 0.12);
+    const fontSize = Math.round(textHeight * 0.55);
+    const safeText = String(tableText)
+      .replace(/&/g, String.fromCharCode(38))
+      .replace(/</g, String.fromCharCode(60))
+      .replace(/>/g, String.fromCharCode(62))
+      .replace(/"/g, String.fromCharCode(34))
+      .replace(/'/g, String.fromCharCode(39));
+    const svgText = `<svg width="${width}" height="${textHeight}"><rect x="0" y="0" width="${width}" height="${textHeight}" fill="${lightColor}"/><text x="50%" y="55%" font-family="sans-serif" font-size="${fontSize}" font-weight="bold" fill="${darkColor}" text-anchor="middle">${safeText}</text></svg>`;
+
+    finalBuffer = await sharp(finalBuffer)
+      .extend({ bottom: textHeight })
       .composite([
         {
-          // overlay a rounded white rect to act as a soft background behind the logo
-          input: Buffer.from(
-            `<svg width="${logoSize}" height="${logoSize}">
-              <rect
-                x="0" y="0"
-                width="${logoSize}" height="${logoSize}"
-                rx="${cornerRadius}" ry="${cornerRadius}"
-                fill="white"
-              />
-            </svg>`,
-          ),
-          blend: "dest-over",
+          input: Buffer.from(svgText),
+          top: width,
+          left: 0,
         },
       ])
       .png()
       .toBuffer();
-
-    logoComposite = {
-      input: logoRounded,
-      top: Math.round((width - logoSize) / 2),
-      left: Math.round((width - logoSize) / 2),
-    };
-  } catch {
-    // If logo download fails, just return QR without logo
-    return qrBuffer;
   }
-
-  // 4. Overlay logo onto QR
-  const finalBuffer = await sharp(qrBuffer)
-    .composite([logoComposite])
-    .png()
-    .toBuffer();
 
   return finalBuffer;
 }
