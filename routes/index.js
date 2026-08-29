@@ -14,6 +14,7 @@ const {
 const authCtrl = require("../controllers/authController");
 const foodsCtrl = require("../controllers/foodsController");
 const catsCtrl = require("../controllers/categoriesController");
+const menusCtrl = require("../controllers/menusController");
 const ordersCtrl = require("../controllers/ordersController");
 const telegramCtrl = require("../controllers/telegramController");
 const { addClient } = require("../services/sse");
@@ -60,6 +61,15 @@ router.get("/auth/link-code", auth, authCtrl.getLinkCode);
 router.patch("/auth/unlink-telegram", auth, authCtrl.unlinkTelegram);
 router.patch("/auth/language", auth, authCtrl.updateLanguage);
 router.patch("/auth/restaurant", auth, upload.single("logo"), authCtrl.updateRestaurant);
+
+// Owner adds ANOTHER restaurant to their account
+router.post("/auth/restaurants", auth, upload.single("logo"), authCtrl.createRestaurant);
+
+// ─── MENUS (public read per restaurant, owner/super_admin write) ─
+router.get("/menus", softAuth, menusCtrl.getAll);
+router.post("/menus", auth, requireOwnerOrAdmin, menusCtrl.create);
+router.patch("/menus/:id", auth, requireOwnerOrAdmin, menusCtrl.update);
+router.delete("/menus/:id", auth, requireOwnerOrAdmin, menusCtrl.remove);
 
 // ─── TELEGRAM BOT ──────────────────────────────────────────
 router.post("/telegram/webhook", telegramCtrl.webhook);
@@ -109,12 +119,22 @@ router.get("/orders/stream", (req, res, next) => {
   }
   auth(req, res, () => requireOwnerOrAdmin(req, res, next));
 }, (req, res) => {
-  // Determine restaurant id from user
-  const fetchRestaurant = () =>
-    db.query(
-      "SELECT id FROM restaurants WHERE owner_id = ? LIMIT 1",
+  // Determine restaurant id from the query param or the owner's first restaurant
+  const fetchRestaurant = () => {
+    const requested = parseInt(req.query.restaurant_id || 0);
+    if (requested) {
+      return db
+        .query(
+          "SELECT id FROM restaurants WHERE id = ? AND owner_id = ?",
+          [requested, req.user.id],
+        )
+        .then(([rows]) => (rows.length ? [{ id: rows[0].id }] : []));
+    }
+    return db.query(
+      "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
       [req.user.id],
     );
+  };
 
   fetchRestaurant().then(([rows]) => {
     if (!rows.length) {
@@ -354,13 +374,33 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
       if (rows.length) restaurantId = rows[0].id;
     }
 
-    // 🔍 Check if QR code already exists for this restaurant + table
+    const frontendUrl =
+      process.env.FRONTEND_URL || `${req.protocol}://${req.get("host")}`;
+
+    // 🏪 Resolve the current restaurant logo FIRST (so cache is always fresh)
+    let restaurantLogo = null;
     if (restaurantId) {
+      const [restRows] = await db.query(
+        "SELECT logo_url FROM restaurants WHERE id = ?",
+        [restaurantId],
+      );
+      if (restRows.length && restRows[0].logo_url) {
+        restaurantLogo = restRows[0].logo_url;
+      }
+    }
+
+    // Force regenerate even if a cached QR exists for this table
+    const force = req.query.force === "1" || req.query.force === "true";
+
+    // 🔍 Check if QR code already exists for this restaurant + table.
+    // If it exists AND the restaurant has a logo, regenerate using the current
+    // logo so the embedded logo stays dynamic. If force, always regenerate.
+    if (restaurantId && !force) {
       const [existing] = await db.query(
         "SELECT qr_data_url, qr_url, created_at FROM qr_codes WHERE restaurant_id = ? AND table_no = ?",
         [restaurantId, tableNumber],
       );
-      if (existing.length) {
+      if (existing.length && !restaurantLogo) {
         return res.json({
           success: true,
           tableNumber,
@@ -372,8 +412,6 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
       }
     }
 
-    const frontendUrl =
-      process.env.FRONTEND_URL || `${req.protocol}://${req.get("host")}`;
     let qrUrl = `${frontendUrl}/menu?table=${tableNumber}`;
     if (restaurantId) {
       const encryptedToken = encryptRestaurantId(String(restaurantId));
@@ -382,18 +420,6 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
 
     const darkColor = "#2d5a27";
     const lightColor = "#f5f0e8";
-
-    // 🏪 Get restaurant logo (if any) for QR code
-    let restaurantLogo = null;
-    if (restaurantId) {
-      const [restRows] = await db.query(
-        "SELECT logo_url FROM restaurants WHERE id = ?",
-        [restaurantId],
-      );
-      if (restRows.length && restRows[0].logo_url) {
-        restaurantLogo = restRows[0].logo_url;
-      }
-    }
 
     if (req.query.format === "png") {
       const pngBuffer = await generateQrWithLogo(qrUrl, {
@@ -422,8 +448,20 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
     });
     const qrCodeDataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
 
-    // 💾 Store the QR code in the database to prevent duplicates
+    // 💾 Store the QR code in the database (upsert) so later requests reuse it.
+    // If the row already existed we are refreshing it (logo changed) → mark
+    // `updated` so the UI doesn't show a misleading "already exists" warning.
+    let alreadyExists = false;
+    let updated = false;
+    let createdAt = null;
     if (restaurantId) {
+      const [existingRow] = await db.query(
+        "SELECT created_at FROM qr_codes WHERE restaurant_id = ? AND table_no = ?",
+        [restaurantId, tableNumber],
+      );
+      alreadyExists = existingRow.length > 0;
+      updated = alreadyExists;
+      createdAt = alreadyExists ? existingRow[0].created_at : null;
       await db.query(
         `INSERT INTO qr_codes (restaurant_id, table_no, qr_url, qr_data_url)
          VALUES (?, ?, ?, ?)
@@ -437,7 +475,9 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
       tableNumber,
       qrCode: qrCodeDataUrl,
       url: qrUrl,
-      alreadyExists: false,
+      alreadyExists,
+      updated,
+      createdAt,
     });
   } catch (error) {
     console.error("QR generation error:", error.message);
@@ -460,11 +500,24 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
             qrUrl += `&rid=${encodeURIComponent(encryptedToken)}`;
           }
         }
+        // Include the restaurant logo dynamically in the fallback too
+        let restaurantLogo = null;
+        if (restaurantId) {
+          const [restRows] = await db.query(
+            "SELECT logo_url FROM restaurants WHERE id = ?",
+            [restaurantId],
+          );
+          if (restRows.length && restRows[0].logo_url) {
+            restaurantLogo = restRows[0].logo_url;
+          }
+        }
         const pngBuffer = await generateQrWithLogo(qrUrl, {
           width: 500,
           margin: 2,
           darkColor: "#2d5a27",
           lightColor: "#f5f0e8",
+          logoUrl: restaurantLogo,
+          tableText: `តុលេខ ${tableNumber}`,
         });
         const qrCodeDataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
         return res.json({

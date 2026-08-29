@@ -7,7 +7,7 @@ async function getRestaurantId(req) {
   if (req.query.restaurant_id) return parseInt(req.query.restaurant_id);
   if (req.user) {
     const [rows] = await db.query(
-      "SELECT id FROM restaurants WHERE owner_id = ?",
+      "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
       [req.user.id],
     );
     if (rows.length) return rows[0].id;
@@ -24,17 +24,21 @@ async function deleteFromImageKit(fileId) {
   }
 }
 
-// GET /api/foods?restaurant_id=X&category=X&search=xxx
+// GET /api/foods?restaurant_id=X&menu_id=Y&category=Z&search=xxx
 exports.getAll = async (req, res) => {
   try {
     const restaurantId = await getRestaurantId(req);
-    const { category, search } = req.query;
+    const { category, search, menu_id } = req.query;
 
     let sql = `SELECT f.*, c.name AS category_name
                FROM foods f
                LEFT JOIN categories c ON f.category = c.id
                WHERE f.restaurant_id = ?`;
     const params = [restaurantId];
+    if (menu_id) {
+      sql += " AND f.menu_id = ?";
+      params.push(menu_id);
+    }
     if (category) {
       sql += " AND f.category = ?";
       params.push(category);
@@ -86,12 +90,38 @@ exports.create = async (req, res) => {
       return res.status(400).json({ error: "name, price, category required" });
 
     const [restaurant] = await db.query(
-      "SELECT id FROM restaurants WHERE owner_id = ?",
-      [req.user.id],
+      "SELECT id FROM restaurants WHERE id = ? AND owner_id = ?",
+      [req.body.restaurant_id || 0, req.user.id],
     );
-    if (!restaurant.length)
-      return res.status(404).json({ error: "Restaurant not found" });
+    // fallback to first owned restaurant if not specified
+    if (!restaurant.length) {
+      const [fallback] = await db.query(
+        "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
+        [req.user.id],
+      );
+      if (!fallback.length)
+        return res.status(404).json({ error: "Restaurant not found" });
+      restaurant.push(fallback[0]);
+    }
     const restaurantId = restaurant[0].id;
+
+    // Resolve + validate menu if provided
+    let menuId = req.body.menu_id || null;
+    if (menuId) {
+      const [menu] = await db.query(
+        "SELECT m.id FROM menus m JOIN restaurants r ON r.id = m.restaurant_id WHERE m.id = ? AND r.id = ? AND r.owner_id = ?",
+        [menuId, restaurantId, req.user.id],
+      );
+      if (!menu.length)
+        return res.status(404).json({ error: "Menu not found or not owned by you" });
+    } else {
+      // Default to the restaurant's first menu so the food is always scoped
+      const [defMenu] = await db.query(
+        "SELECT id FROM menus WHERE restaurant_id = ? ORDER BY id ASC LIMIT 1",
+        [restaurantId],
+      );
+      menuId = defMenu.length ? defMenu[0].id : null;
+    }
 
     let img = null,
       imgFileId = null;
@@ -115,9 +145,10 @@ exports.create = async (req, res) => {
     }
 
     const [result] = await db.query(
-      "INSERT INTO foods (restaurant_id, name, price, category, img, img_file_id, status) VALUES (?,?,?,?,?,?,?)",
+      "INSERT INTO foods (restaurant_id, menu_id, name, price, category, img, img_file_id, status) VALUES (?,?,?,?,?,?,?,?)",
       [
         restaurantId,
+        menuId,
         name,
         parseFloat(price),
         category,

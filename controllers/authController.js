@@ -43,35 +43,16 @@ function generateToken(user) {
 
 // ─── REGISTER (Owner only) ──────────────────────────────────
 exports.register = async (req, res) => {
-  const { email, password, fullName, restaurantName } = req.body;
-  let logoUrl = null;
+  const { email, password, fullName } = req.body;
 
-  // Validation
+  // Validation — only email + password are needed to create the account.
+  // The owner adds their restaurant(s) after login.
   if (!email || !email.trim())
     return res.status(400).json({ error: "Email is required" });
   if (!password || password.length < 6)
     return res
       .status(400)
       .json({ error: "Password must be at least 6 characters" });
-  if (!restaurantName || !restaurantName.trim())
-    return res.status(400).json({ error: "Restaurant name is required" });
-
-  // Handle logo file upload
-  if (req.file) {
-    try {
-      const base64 = req.file.buffer.toString("base64");
-      const dataUri = `data:${req.file.mimetype};base64,${base64}`;
-      const uploadResult = await imagekit.upload({
-        file: dataUri,
-        fileName: `logo_${Date.now()}_${req.file.originalname.replace(/[^a-zA-Z0-9.]/g, "_")}`,
-        folder: "/restaurant_logos",
-        useUniqueFileName: true,
-      });
-      logoUrl = uploadResult.url;
-    } catch (uploadErr) {
-      console.error("Logo upload error:", uploadErr.message);
-    }
-  }
 
   try {
     // Check email uniqueness
@@ -85,28 +66,14 @@ exports.register = async (req, res) => {
     // Generate email verify token
     const verifyToken = crypto.randomBytes(32).toString("hex");
     const hashedPassword = await bcrypt.hash(password, 10);
-    const linkCode = await generateLinkCode();
 
-    // Create user (owner) — inactive until email is verified
-    const [userResult] = await db.query(
+    // Create user (owner) — inactive until email is verified.
+    // NOTE: no restaurant is auto-created here; the owner adds one
+    // after logging in (one account → many restaurants).
+    await db.query(
       `INSERT INTO users (email, password, role, status, email_verify_token)
        VALUES (?, ?, 'owner', 'inactive', ?)`,
       [email.trim(), hashedPassword || "", verifyToken],
-    );
-    const userId = userResult.insertId;
-
-    // Create restaurant
-    const [restaurantResult] = await db.query(
-      `INSERT INTO restaurants (owner_id, name, logo_url, telegram_link_code, default_language)
-       VALUES (?, ?, ?, ?, 'km')`,
-      [userId, restaurantName.trim(), logoUrl, linkCode],
-    );
-    const restaurantId = restaurantResult.insertId;
-
-    // Create default category
-    await db.query(
-      "INSERT INTO categories (restaurant_id, name) VALUES (?, ?)",
-      [restaurantId, "ម្ហូបទូទៅ"],
     );
 
     // Send verification email (non-blocking - don't await)
@@ -147,6 +114,7 @@ exports.register = async (req, res) => {
       token: null,
       user: null,
       restaurant: null,
+      restaurants: [],
       message: "Registration successful! Please check your email to verify your account.",
     });
   } catch (err) {
@@ -163,11 +131,7 @@ exports.login = async (req, res) => {
 
   try {
     const [rows] = await db.query(
-      `SELECT u.*, r.id AS restaurant_id, r.name AS restaurant_name,
-              r.logo_url, r.telegram_chat_id, r.telegram_link_code, r.default_language
-       FROM users u
-       LEFT JOIN restaurants r ON r.owner_id = u.id
-       WHERE u.email = ?`,
+      `SELECT u.* FROM users u WHERE u.email = ?`,
       [email],
     );
     if (!rows.length)
@@ -192,6 +156,15 @@ exports.login = async (req, res) => {
       user.id,
     ]);
 
+    // Fetch ALL restaurants owned by this account
+    const [restaurants] = await db.query(
+      `SELECT id, name, logo_url AS logoUrl, telegram_chat_id AS telegramChatId,
+              telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
+              status
+       FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
+      [user.id],
+    );
+
     const token = generateToken(user);
 
     res.json({
@@ -202,16 +175,7 @@ exports.login = async (req, res) => {
         role: user.role,
         emailVerified: !!user.email_verified_at,
       },
-      restaurant: user.restaurant_id
-        ? {
-            id: user.restaurant_id,
-            name: user.restaurant_name,
-            logoUrl: user.logo_url,
-            telegramChatId: user.telegram_chat_id,
-            telegramLinkCode: user.telegram_link_code,
-            defaultLanguage: user.default_language,
-          }
-        : null,
+      restaurants,
     });
   } catch (err) {
     console.error("Login error:", err);
@@ -415,17 +379,23 @@ exports.resetPassword = async (req, res) => {
 exports.me = async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT u.id, u.email, u.role, u.email_verified_at, u.status, u.created_at,
-              r.id AS restaurant_id, r.name AS restaurant_name,
-              r.logo_url, r.telegram_chat_id, r.telegram_link_code, r.default_language
-       FROM users u
-       LEFT JOIN restaurants r ON r.owner_id = u.id
-       WHERE u.id = ?`,
+      `SELECT u.id, u.email, u.role, u.email_verified_at, u.status, u.created_at
+       FROM users u WHERE u.id = ?`,
       [req.user.id],
     );
     if (!rows.length) return res.status(404).json({ error: "User not found" });
 
     const user = rows[0];
+
+    // Fetch ALL restaurants owned by this account
+    const [restaurants] = await db.query(
+      `SELECT id, name, logo_url AS logoUrl, telegram_chat_id AS telegramChatId,
+              telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
+              status
+       FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
+      [req.user.id],
+    );
+
     res.json({
       user: {
         id: user.id,
@@ -435,16 +405,7 @@ exports.me = async (req, res) => {
         status: user.status,
         createdAt: user.created_at,
       },
-      restaurant: user.restaurant_id
-        ? {
-            id: user.restaurant_id,
-            name: user.restaurant_name,
-            logoUrl: user.logo_url,
-            telegramChatId: user.telegram_chat_id,
-            telegramLinkCode: user.telegram_link_code,
-            defaultLanguage: user.default_language,
-          }
-        : null,
+      restaurants,
     });
   } catch (err) {
     console.error("Me error:", err);
@@ -452,16 +413,100 @@ exports.me = async (req, res) => {
   }
 };
 
+// ─── CREATE RESTAURANT (owner adds another restaurant) ─────
+exports.createRestaurant = async (req, res) => {
+  const { name } = req.body;
+  let logoUrl = null;
+
+  if (!name || !name.trim())
+    return res.status(400).json({ error: "Restaurant name is required" });
+
+  // Handle optional logo upload
+  if (req.file) {
+    try {
+      const imagekit = require("../config/imagekit");
+      const base64 = req.file.buffer.toString("base64");
+      const dataUri = `data:${req.file.mimetype};base64,${base64}`;
+      const uploadResult = await imagekit.upload({
+        file: dataUri,
+        fileName: `logo_${Date.now()}_${req.file.originalname.replace(/[^a-zA-Z0-9.]/g, "_")}`,
+        folder: "/restaurant_logos",
+        useUniqueFileName: true,
+      });
+      logoUrl = uploadResult.url;
+    } catch (uploadErr) {
+      console.error("Logo upload error:", uploadErr.message);
+    }
+  }
+
+  try {
+    const linkCode = await generateLinkCode();
+
+    const [restaurantResult] = await db.query(
+      `INSERT INTO restaurants (owner_id, name, logo_url, telegram_link_code, default_language)
+       VALUES (?, ?, ?, ?, 'km')`,
+      [req.user.id, name.trim(), logoUrl, linkCode],
+    );
+    const restaurantId = restaurantResult.insertId;
+
+    // Create a default menu + default category so the restaurant is immediately usable
+    const [menuResult] = await db.query(
+      "INSERT INTO menus (restaurant_id, name, sort_order) VALUES (?, 'Default Menu', 0)",
+      [restaurantId],
+    );
+    await db.query(
+      "INSERT INTO categories (restaurant_id, menu_id, name) VALUES (?, ?, 'ម្ហូបទូទៅ')",
+      [restaurantId, menuResult.insertId],
+    );
+
+    const [row] = await db.query(
+      `SELECT id, name, logo_url AS logoUrl, telegram_chat_id AS telegramChatId,
+              telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
+              status
+       FROM restaurants WHERE id = ?`,
+      [restaurantId],
+    );
+    res.status(201).json({ restaurant: row[0] });
+  } catch (err) {
+    console.error("Create restaurant error:", err);
+    res.status(500).json({ error: "Server error: " + err.message });
+  }
+};
+
+// Helper: resolve a restaurant owned by the current user; falls back to the
+// first owned restaurant when no restaurant_id is supplied (legacy behavior).
+async function resolveOwnerRestaurant(req) {
+  const requested = parseInt(req.body.restaurant_id || req.query.restaurant_id || 0);
+  if (requested) {
+    const [rows] = await db.query(
+      "SELECT id FROM restaurants WHERE id = ? AND owner_id = ?",
+      [requested, req.user.id]
+    );
+    if (rows.length) return rows[0].id;
+    return null;
+  }
+  const [rows] = await db.query(
+    "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
+    [req.user.id]
+  );
+  return rows.length ? rows[0].id : null;
+}
+
 // ─── TELEGRAM LINK CODE ────────────────────────────────────
 exports.getLinkCode = async (req, res) => {
   try {
+    const restaurantId = await resolveOwnerRestaurant(req);
+    if (!restaurantId)
+      return res.status(404).json({ error: "Restaurant not found" });
+
     const [rows] = await db.query(
-      "SELECT telegram_link_code, telegram_chat_id FROM restaurants WHERE owner_id = ?",
-      [req.user.id],
+      "SELECT telegram_link_code, telegram_chat_id FROM restaurants WHERE id = ?",
+      [restaurantId],
     );
     if (!rows.length)
       return res.status(404).json({ error: "Restaurant not found" });
     res.json({
+      restaurantId,
       linkCode: rows[0].telegram_link_code,
       telegramChatId: rows[0].telegram_chat_id,
       isLinked: !!rows[0].telegram_chat_id,
@@ -475,9 +520,13 @@ exports.getLinkCode = async (req, res) => {
 // ─── UNLINK TELEGRAM ───────────────────────────────────────
 exports.unlinkTelegram = async (req, res) => {
   try {
+    const restaurantId = await resolveOwnerRestaurant(req);
+    if (!restaurantId)
+      return res.status(404).json({ error: "Restaurant not found" });
+
     await db.query(
-      "UPDATE restaurants SET telegram_chat_id = NULL WHERE owner_id = ?",
-      [req.user.id],
+      "UPDATE restaurants SET telegram_chat_id = NULL WHERE id = ?",
+      [restaurantId],
     );
     res.json({ success: true, message: "Telegram unlinked" });
   } catch (err) {
@@ -514,21 +563,21 @@ exports.updateRestaurant = async (req, res) => {
   }
 
   try {
+    const restaurantId = await resolveOwnerRestaurant(req);
+    if (!restaurantId)
+      return res.status(404).json({ error: "Restaurant not found" });
+
     await db.query(
-      "UPDATE restaurants SET name = ?, logo_url = COALESCE(?, logo_url) WHERE owner_id = ?",
-      [name.trim(), logoUrl || null, req.user.id],
+      "UPDATE restaurants SET name = ?, logo_url = COALESCE(?, logo_url) WHERE id = ?",
+      [name.trim(), logoUrl || null, restaurantId],
     );
 
     // Fetch updated restaurant
     const [rows] = await db.query(
       `SELECT id, name, logo_url, telegram_chat_id, telegram_link_code, default_language
-       FROM restaurants WHERE owner_id = ?`,
-      [req.user.id],
+       FROM restaurants WHERE id = ?`,
+      [restaurantId],
     );
-
-    if (!rows.length) {
-      return res.status(404).json({ error: "Restaurant not found" });
-    }
 
     const r = rows[0];
     res.json({
@@ -554,9 +603,13 @@ exports.updateLanguage = async (req, res) => {
   if (!["km", "en"].includes(language))
     return res.status(400).json({ error: "Invalid language" });
   try {
+    const restaurantId = await resolveOwnerRestaurant(req);
+    if (!restaurantId)
+      return res.status(404).json({ error: "Restaurant not found" });
+
     await db.query(
-      "UPDATE restaurants SET default_language = ? WHERE owner_id = ?",
-      [language, req.user.id],
+      "UPDATE restaurants SET default_language = ? WHERE id = ?",
+      [language, restaurantId],
     );
     res.json({ success: true, language });
   } catch (err) {

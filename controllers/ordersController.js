@@ -94,19 +94,33 @@ exports.create = async (req, res) => {
   }
 };
 
-// GET /api/orders - Get orders for owner's restaurant
+// GET /api/orders - Get orders for one of the owner's restaurants
 exports.getAll = async (req, res) => {
   try {
-    const [restaurant] = await db.query(
-      "SELECT id FROM restaurants WHERE owner_id = ?",
-      [req.user.id],
-    );
-    if (!restaurant.length)
-      return res.status(404).json({ error: "Restaurant not found" });
+    const requested = parseInt(req.query.restaurant_id || 0);
+    let restaurantId = requested;
+    if (!restaurantId) {
+      const [first] = await db.query(
+        "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
+        [req.user.id],
+      );
+      if (!first.length)
+        return res.status(404).json({ error: "Restaurant not found" });
+      restaurantId = first[0].id;
+    } else {
+      const [owned] = await db.query(
+        "SELECT id FROM restaurants WHERE id = ? AND owner_id = ?",
+        [restaurantId, req.user.id],
+      );
+      if (!owned.length)
+        return res
+          .status(404)
+          .json({ error: "Restaurant not found or not owned by you" });
+    }
 
     const [rows] = await db.query(
       "SELECT * FROM orders WHERE restaurant_id = ? ORDER BY created_at DESC",
-      [restaurant[0].id],
+      [restaurantId],
     );
     res.json(rows);
   } catch (err) {
@@ -117,13 +131,26 @@ exports.getAll = async (req, res) => {
 // GET /api/orders/stats - Get revenue and order analytics for owner's restaurant
 exports.stats = async (req, res) => {
   try {
-    const [restaurant] = await db.query(
-      "SELECT id FROM restaurants WHERE owner_id = ?",
-      [req.user.id],
-    );
-    if (!restaurant.length)
-      return res.status(404).json({ error: "Restaurant not found" });
-    const restaurantId = restaurant[0].id;
+    const requested = parseInt(req.query.restaurant_id || 0);
+    let restaurantId = requested;
+    if (!restaurantId) {
+      const [first] = await db.query(
+        "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
+        [req.user.id],
+      );
+      if (!first.length)
+        return res.status(404).json({ error: "Restaurant not found" });
+      restaurantId = first[0].id;
+    } else {
+      const [owned] = await db.query(
+        "SELECT id FROM restaurants WHERE id = ? AND owner_id = ?",
+        [restaurantId, req.user.id],
+      );
+      if (!owned.length)
+        return res
+          .status(404)
+          .json({ error: "Restaurant not found or not owned by you" });
+    }
 
     const filters = [restaurantId];
     let whereClause = "restaurant_id = ?";
@@ -177,7 +204,9 @@ exports.stats = async (req, res) => {
 exports.getRestaurant = async (req, res) => {
   try {
     const [rows] = await db.query(
-      "SELECT id, name, logo_url, default_language FROM restaurants WHERE id = ? AND status = 'active'",
+      `SELECT id, name, logo_url AS logoUrl, default_language AS defaultLanguage,
+              telegram_chat_id AS telegramChatId, telegram_link_code AS telegramLinkCode
+       FROM restaurants WHERE id = ? AND status = 'active'`,
       [req.params.id],
     );
     if (!rows.length)
