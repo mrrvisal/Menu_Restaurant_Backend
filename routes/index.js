@@ -52,6 +52,7 @@ router.get("/restaurants/:id", ordersCtrl.getRestaurant);
 // ─── AUTH ROUTES ───────────────────────────────────────────
 router.post("/auth/register", upload.single("logo"), authCtrl.register);
 router.post("/auth/login", authCtrl.login);
+router.post("/auth/google", authCtrl.googleLogin);
 router.get("/auth/verify-email", authCtrl.verifyEmail);
 router.post("/auth/resend-verification", authCtrl.resendVerification);
 router.post("/auth/forgot-password", authCtrl.forgotPassword);

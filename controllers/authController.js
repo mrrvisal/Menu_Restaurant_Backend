@@ -5,6 +5,7 @@ const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const imagekit = require("../config/imagekit");
 const { sendMail } = require("../config/mailer");
+const { validatePassword } = require("../helpers/passwordPolicy");
 
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
@@ -41,6 +42,21 @@ function generateToken(user) {
   );
 }
 
+// Cache of the users-table columns. Some deployed databases were created
+// from an older schema (e.g. without full_name) — inspecting once and
+// building queries dynamically keeps Google sign-in working everywhere.
+let usersColumnsCache = null;
+async function getUsersColumns() {
+  if (!usersColumnsCache) {
+    const [cols] = await db.query(
+      `SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'`,
+    );
+    usersColumnsCache = new Set(cols.map((c) => c.name));
+  }
+  return usersColumnsCache;
+}
+
 // ─── REGISTER (Owner only) ──────────────────────────────────
 exports.register = async (req, res) => {
   const { email, password, fullName } = req.body;
@@ -49,10 +65,13 @@ exports.register = async (req, res) => {
   // The owner adds their restaurant(s) after login.
   if (!email || !email.trim())
     return res.status(400).json({ error: "Email is required" });
-  if (!password || password.length < 6)
-    return res
-      .status(400)
-      .json({ error: "Password must be at least 6 characters" });
+
+  // Strong password policy (see helpers/passwordPolicy.js)
+  const pwCheck = validatePassword(password);
+  if (!pwCheck.valid)
+    return res.status(400).json({
+      error: "Password must contain: " + pwCheck.errors.join(", "),
+    });
 
   try {
     // Check email uniqueness
@@ -346,10 +365,13 @@ exports.resetPassword = async (req, res) => {
   const { token, password } = req.body;
   if (!token || !password)
     return res.status(400).json({ error: "Token and password required" });
-  if (password.length < 6)
-    return res
-      .status(400)
-      .json({ error: "Password must be at least 6 characters" });
+
+  // Same strong password policy as registration
+  const pwCheck = validatePassword(password);
+  if (!pwCheck.valid)
+    return res.status(400).json({
+      error: "Password must contain: " + pwCheck.errors.join(", "),
+    });
 
   try {
     const [rows] = await db.query(
@@ -613,6 +635,145 @@ exports.updateLanguage = async (req, res) => {
     );
     res.json({ success: true, language });
   } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// ─── GOOGLE SIGN-IN ─────────────────────────────────────────
+// Receives a Google ID token (credential) from Google Identity Services on
+// the frontend, verifies it, links/creates the local account and issues the
+// same JWT used by email/password login.
+exports.googleLogin = async (req, res) => {
+  const { credential } = req.body;
+  if (!credential)
+    return res.status(400).json({ error: "Google credential is required" });
+
+  // Accept one or more client IDs (comma-separated) so dev/prod can share the route
+  const googleClientIds = (process.env.GOOGLE_CLIENT_ID || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!googleClientIds.length)
+    return res
+      .status(500)
+      .json({ error: "Google Sign-In is not configured on the server" });
+
+  // 1) Verify the ID token with Google (checks signature, audience & expiry)
+  let payload;
+  try {
+    const { OAuth2Client } = require("google-auth-library");
+    const client = new OAuth2Client();
+    const ticket = await client.verifyIdToken({
+      idToken: credential,
+      audience: googleClientIds,
+    });
+    payload = ticket.getPayload();
+  } catch (verifyErr) {
+    console.error("Google token verification failed:", verifyErr.message);
+    return res.status(401).json({ error: "Invalid Google token" });
+  }
+
+  const googleId = payload.sub;
+  const email = payload.email;
+  const fullName = payload.name || "";
+  if (!googleId || !email)
+    return res.status(401).json({ error: "Invalid Google token" });
+  if (payload.email_verified === false)
+    return res
+      .status(401)
+      .json({ error: "Your Google email is not verified" });
+
+  try {
+    // 2) Find by google_id (returning Google users) …
+    let [rows] = await db.query("SELECT * FROM users WHERE google_id = ?", [
+      googleId,
+    ]);
+    let user = rows[0] || null;
+
+    // … else link the Google account to an existing email account
+    if (!user) {
+      [rows] = await db.query("SELECT * FROM users WHERE email = ?", [email]);
+      if (rows.length) {
+        user = rows[0];
+        await db.query("UPDATE users SET google_id = ? WHERE id = ?", [
+          googleId,
+          user.id,
+        ]);
+        user.google_id = googleId;
+      }
+    }
+
+    // … else create a brand-new owner account (email already verified by Google)
+    if (!user) {
+      // The password column is NOT NULL — store an unusable random hash so
+      // this account can only be signed into via Google.
+      const unusablePassword = await bcrypt.hash(
+        crypto.randomBytes(32).toString("hex"),
+        10,
+      );
+      // Build the INSERT from the columns that actually exist in this
+      // database (older schemas may lack full_name). email_verified_at is
+      // always set to NOW() server-side, so it stays out of the placeholders.
+      const cols = await getUsersColumns();
+      const insertCols = ["email", "password", "role", "status"];
+      const insertVals = [email, unusablePassword, "owner", "active"];
+      if (cols.has("full_name")) {
+        insertCols.splice(2, 0, "full_name");
+        insertVals.splice(2, 0, fullName);
+      }
+      const placeholders = insertCols.map(() => "?").join(", ");
+      const [result] = await db.query(
+        `INSERT INTO users (${insertCols.join(", ")}, email_verified_at)
+         VALUES (${placeholders}, NOW())`,
+        insertVals,
+      );
+      [rows] = await db.query("SELECT * FROM users WHERE id = ?", [
+        result.insertId,
+      ]);
+      user = rows[0];
+    } else if (!user.email_verified_at || user.status === "inactive") {
+      // Google already verified this email — activate the account
+      await db.query(
+        "UPDATE users SET email_verified_at = NOW(), email_verify_token = NULL, status = 'active' WHERE id = ?",
+        [user.id],
+      );
+      user.email_verified_at = user.email_verified_at || new Date();
+      user.status = "active";
+    }
+
+    if (user.status === "suspended")
+      return res
+        .status(403)
+        .json({ error: "Your account has been suspended. Contact support." });
+
+    // Update last login
+    await db.query("UPDATE users SET last_login_at = NOW() WHERE id = ?", [
+      user.id,
+    ]);
+
+    // Fetch ALL restaurants owned by this account (same shape as /auth/login)
+    const [restaurants] = await db.query(
+      `SELECT id, name, logo_url AS logoUrl, telegram_chat_id AS telegramChatId,
+              telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
+              status
+       FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
+      [user.id],
+    );
+
+    const token = generateToken(user);
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        emailVerified: true,
+      },
+      restaurants,
+    });
+  } catch (err) {
+    console.error("Google login error:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
