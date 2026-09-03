@@ -39,7 +39,7 @@ const upload = multer({
 router.get("/restaurants", async (req, res) => {
   try {
     const [rows] = await db.query(
-      "SELECT id, name, logo_url, default_language FROM restaurants WHERE status = 'active' ORDER BY id ASC",
+      "SELECT id, name, logo_url, default_language, theme_color FROM restaurants WHERE status = 'active' ORDER BY id ASC",
     );
     res.json(rows);
   } catch (err) {
@@ -65,6 +65,8 @@ router.patch("/auth/restaurant", auth, upload.single("logo"), authCtrl.updateRes
 
 // Owner adds ANOTHER restaurant to their account
 router.post("/auth/restaurants", auth, upload.single("logo"), authCtrl.createRestaurant);
+router.patch("/auth/theme", auth, authCtrl.updateTheme);
+router.patch("/auth/sidebar", auth, authCtrl.updateSidebar);
 
 // ─── MENUS (public read per restaurant, owner/super_admin write) ─
 router.get("/menus", softAuth, menusCtrl.getAll);

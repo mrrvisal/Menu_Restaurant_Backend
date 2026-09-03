@@ -179,6 +179,8 @@ exports.login = async (req, res) => {
     const [restaurants] = await db.query(
       `SELECT id, name, logo_url AS logoUrl, telegram_chat_id AS telegramChatId,
               telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
+              theme_color AS themeColor,
+              sidebar_position AS sidebarPosition,
               status
        FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
       [user.id],
@@ -413,6 +415,8 @@ exports.me = async (req, res) => {
     const [restaurants] = await db.query(
       `SELECT id, name, logo_url AS logoUrl, telegram_chat_id AS telegramChatId,
               telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
+              theme_color AS themeColor,
+              sidebar_position AS sidebarPosition,
               status
        FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
       [req.user.id],
@@ -484,6 +488,8 @@ exports.createRestaurant = async (req, res) => {
     const [row] = await db.query(
       `SELECT id, name, logo_url AS logoUrl, telegram_chat_id AS telegramChatId,
               telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
+              theme_color AS themeColor,
+              sidebar_position AS sidebarPosition,
               status
        FROM restaurants WHERE id = ?`,
       [restaurantId],
@@ -596,7 +602,7 @@ exports.updateRestaurant = async (req, res) => {
 
     // Fetch updated restaurant
     const [rows] = await db.query(
-      `SELECT id, name, logo_url, telegram_chat_id, telegram_link_code, default_language
+      `SELECT id, name, logo_url, telegram_chat_id, telegram_link_code, default_language, theme_color, sidebar_position
        FROM restaurants WHERE id = ?`,
       [restaurantId],
     );
@@ -611,10 +617,62 @@ exports.updateRestaurant = async (req, res) => {
         telegramChatId: r.telegram_chat_id,
         telegramLinkCode: r.telegram_link_code,
         defaultLanguage: r.default_language,
+        themeColor: r.theme_color,
+        sidebarPosition: r.sidebar_position,
       },
     });
   } catch (err) {
     console.error("Update restaurant error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// ─── UPDATE RESTAURANT THEME COLOR ─────────────────────────
+// Saves the owner's chosen dynamic theme color to their (current)
+// restaurant so the public customer menu / preview applies it too.
+exports.updateTheme = async (req, res) => {
+  const { themeColor } = req.body;
+  const HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+  if (!themeColor || typeof themeColor !== "string" || !HEX_RE.test(themeColor.trim())) {
+    return res.status(400).json({ error: "Invalid theme color" });
+  }
+
+  try {
+    const restaurantId = await resolveOwnerRestaurant(req);
+    if (!restaurantId)
+      return res.status(404).json({ error: "Restaurant not found" });
+
+    await db.query("UPDATE restaurants SET theme_color = ? WHERE id = ?", [
+      themeColor.trim(),
+      restaurantId,
+    ]);
+    res.json({ success: true, themeColor: themeColor.trim() });
+  } catch (err) {
+    console.error("Update theme error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// ─── UPDATE RESTAURANT SIDEBAR POSITION ────────────────────
+// Lets the owner choose where their admin sidebar sits: left / right / top / bottom.
+exports.updateSidebar = async (req, res) => {
+  const { sidebarPosition } = req.body;
+  const allowed = ["left", "right", "top", "bottom"];
+  if (!allowed.includes(sidebarPosition))
+    return res.status(400).json({ error: "Invalid sidebar position" });
+
+  try {
+    const restaurantId = await resolveOwnerRestaurant(req);
+    if (!restaurantId)
+      return res.status(404).json({ error: "Restaurant not found" });
+
+    await db.query("UPDATE restaurants SET sidebar_position = ? WHERE id = ?", [
+      sidebarPosition,
+      restaurantId,
+    ]);
+    res.json({ success: true, sidebarPosition });
+  } catch (err) {
+    console.error("Update sidebar error:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -755,6 +813,8 @@ exports.googleLogin = async (req, res) => {
     const [restaurants] = await db.query(
       `SELECT id, name, logo_url AS logoUrl, telegram_chat_id AS telegramChatId,
               telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
+              theme_color AS themeColor,
+              sidebar_position AS sidebarPosition,
               status
        FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
       [user.id],

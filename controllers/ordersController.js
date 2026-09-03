@@ -205,7 +205,8 @@ exports.getRestaurant = async (req, res) => {
   try {
     const [rows] = await db.query(
       `SELECT id, name, logo_url AS logoUrl, default_language AS defaultLanguage,
-              telegram_chat_id AS telegramChatId, telegram_link_code AS telegramLinkCode
+              telegram_chat_id AS telegramChatId, telegram_link_code AS telegramLinkCode,
+              theme_color AS themeColor
        FROM restaurants WHERE id = ? AND status = 'active'`,
       [req.params.id],
     );
