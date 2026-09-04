@@ -6,6 +6,10 @@ const crypto = require("crypto");
 const imagekit = require("../config/imagekit");
 const { sendMail } = require("../config/mailer");
 const { validatePassword } = require("../helpers/passwordPolicy");
+const {
+  extractDeviceInfo,
+  lookupIpLocation,
+} = require("../helpers/deviceInfo");
 
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
@@ -29,17 +33,141 @@ async function generateLinkCode() {
   return code;
 }
 
-// Helper: generate JWT token
-function generateToken(user) {
-  return jwt.sign(
-    {
-      id: user.id,
-      email: user.email,
-      role: user.role,
-    },
-    JWT_SECRET,
-    { expiresIn: "24h" },
-  );
+// Helper: generate JWT token (sid = device session id, when tracking is on)
+function generateToken(user, sid) {
+  const payload = {
+    id: user.id,
+    email: user.email,
+    role: user.role,
+  };
+  if (sid) payload.sid = sid;
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: "24h" });
+}
+
+// Helper: create/update the device session for this login.
+// Records WHO logged in from WHERE: device id, name, type, browser, OS,
+// screen, timezone, language, platform, hardware, raw user-agent, IP
+// (+ best-effort city/country/coordinates/ASN lookup).
+// Also writes one audit row per login into device_login_history.
+// Returns the new session id (sid) to embed in the JWT, or null if the
+// device_sessions table isn't available (login still proceeds).
+async function upsertDeviceSession(req, user, method = "email") {
+  const info = extractDeviceInfo(req);
+  const sid = crypto.randomBytes(16).toString("hex");
+  try {
+    await db.query(
+      `INSERT INTO device_sessions
+        (user_id, device_id, session_token, device_name, device_type,
+         browser, browser_version, os, os_version, screen, timezone,
+         language, platform, hardware, user_agent, ip_address,
+         last_login_at, last_active_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+       ON DUPLICATE KEY UPDATE
+         session_token    = VALUES(session_token),
+         device_name      = VALUES(device_name),
+         device_type      = VALUES(device_type),
+         browser          = VALUES(browser),
+         browser_version  = VALUES(browser_version),
+         os               = VALUES(os),
+         os_version       = VALUES(os_version),
+         screen           = VALUES(screen),
+         timezone         = VALUES(timezone),
+         language         = VALUES(language),
+         platform         = VALUES(platform),
+         hardware         = VALUES(hardware),
+         user_agent       = VALUES(user_agent),
+         ip_address       = VALUES(ip_address),
+         login_count      = login_count + 1,
+         last_login_at    = NOW(),
+         last_active_at   = NOW(),
+         revoked          = 0,
+         revoked_at       = NULL`,
+      [
+        user.id,
+        info.deviceId,
+        sid,
+        info.deviceName,
+        info.deviceType,
+        info.browser,
+        info.browserVersion,
+        info.os,
+        info.osVersion,
+        info.screen,
+        info.timezone,
+        info.language,
+        info.platform,
+        info.hardware,
+        info.userAgent,
+        info.ip_address,
+      ],
+    );
+  } catch (err) {
+    console.error("Device session upsert failed:", err.message);
+    return null;
+  }
+  // Audit trail: one row per login event (own try/catch — a missing
+  // history table must never break the session/revocation machinery).
+  try {
+    await db.query(
+      `INSERT INTO device_login_history
+        (user_id, device_id, device_name, method, ip_address,
+         browser, os, user_agent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        user.id,
+        info.deviceId,
+        info.deviceName,
+        method,
+        info.ip_address,
+        `${info.browser}${info.browserVersion ? " " + info.browserVersion.split(".")[0] : ""}`,
+        `${info.os}${info.osVersion ? " " + info.osVersion : ""}`,
+        info.userAgent,
+      ],
+    );
+  } catch (err) {
+    if (err.code !== "ER_NO_SUCH_TABLE")
+      console.error("Login history insert failed:", err.message);
+  }
+  // Enrich with city/country/coordinates/ASN from the IP (never blocks,
+  // never throws). Updates BOTH the session row and the newest audit row.
+  lookupIpLocation(info.ip_address).then((loc) => {
+    if (!loc) return;
+    db.query(
+      `UPDATE device_sessions
+       SET city      = COALESCE(city, ?),
+           region    = COALESCE(region, ?),
+           country   = COALESCE(country, ?),
+           isp       = COALESCE(isp, ?),
+           latitude  = COALESCE(latitude, ?),
+           longitude = COALESCE(longitude, ?),
+           asn       = COALESCE(asn, ?),
+           org       = COALESCE(org, ?),
+           is_proxy  = ?,
+           is_hosting = ?
+       WHERE session_token = ?`,
+      [
+        loc.city,
+        loc.region,
+        loc.country,
+        loc.isp,
+        loc.latitude,
+        loc.longitude,
+        loc.asn,
+        loc.org,
+        loc.isProxy ? 1 : 0,
+        loc.isHosting ? 1 : 0,
+        sid,
+      ],
+    ).catch(() => {});
+    db.query(
+      `UPDATE device_login_history
+       SET city = ?, region = ?, country = ?, asn = ?
+       WHERE user_id = ? AND device_id = ?
+       ORDER BY id DESC LIMIT 1`,
+      [loc.city, loc.region, loc.country, loc.asn, user.id, info.deviceId],
+    ).catch(() => {});
+  });
+  return sid;
 }
 
 // Cache of the users-table columns. Some deployed databases were created
@@ -186,7 +314,8 @@ exports.login = async (req, res) => {
       [user.id],
     );
 
-    const token = generateToken(user);
+    const sid = await upsertDeviceSession(req, user, "email");
+    const token = generateToken(user, sid);
 
     res.json({
       token,
@@ -820,7 +949,8 @@ exports.googleLogin = async (req, res) => {
       [user.id],
     );
 
-    const token = generateToken(user);
+    const sid = await upsertDeviceSession(req, user, "google");
+    const token = generateToken(user, sid);
 
     res.json({
       token,
@@ -834,6 +964,101 @@ exports.googleLogin = async (req, res) => {
     });
   } catch (err) {
     console.error("Google login error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// ─── DEVICE SESSIONS (owner security) ──────────────────────
+// The owner can see EVERY device that has accessed the account and
+// revoke any of them. Revoking flips `revoked = 1`; the auth middleware
+// then rejects that device's token with code "device_revoked".
+
+// GET /api/auth/devices — list all devices for the logged-in account
+exports.listDevices = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT id, device_id AS deviceId, device_name AS deviceName,
+              device_type AS deviceType, browser, browser_version AS browserVersion,
+              os, os_version AS osVersion, screen, timezone, language,
+              platform, hardware,
+              user_agent AS userAgent,
+              ip_address AS ipAddress, city, region, country, isp,
+              latitude, longitude, asn, org,
+              is_proxy AS isProxy, is_hosting AS isHosting,
+              login_count AS loginCount, last_active_at AS lastActiveAt,
+              last_login_at AS lastLoginAt, created_at AS firstSeenAt,
+              (session_token IS NOT NULL AND session_token = ?) AS isCurrent,
+              revoked, revoked_at AS revokedAt
+       FROM device_sessions
+       WHERE user_id = ?
+       ORDER BY revoked ASC, last_active_at DESC`,
+      [req.user.sid || "", req.user.id],
+    );
+    res.json(rows);
+  } catch (err) {
+    if (err.code === "ER_NO_SUCH_TABLE") return res.json([]); // not migrated yet
+    console.error("List devices error:", err.message);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// GET /api/auth/devices/history — audit trail of login events
+// (one row per login: when, which device, method, IP, location).
+exports.listLoginHistory = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT id, device_id AS deviceId, device_name AS deviceName,
+              method, ip_address AS ipAddress, city, region, country,
+              asn, browser, os, created_at AS at
+       FROM device_login_history
+       WHERE user_id = ?
+       ORDER BY id DESC
+       LIMIT 50`,
+      [req.user.id],
+    );
+    res.json(rows);
+  } catch (err) {
+    if (err.code === "ER_NO_SUCH_TABLE") return res.json([]); // not migrated yet
+    console.error("List login history error:", err.message);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// DELETE /api/auth/devices/:id — remove (revoke) one device
+exports.revokeDevice = async (req, res) => {
+  try {
+    const [result] = await db.query(
+      "UPDATE device_sessions SET revoked = 1, revoked_at = NOW() WHERE id = ? AND user_id = ?",
+      [req.params.id, req.user.id],
+    );
+    if (!result.affectedRows)
+      return res.status(404).json({ error: "Device not found" });
+    res.json({ message: "Device removed successfully" });
+  } catch (err) {
+    if (err.code === "ER_NO_SUCH_TABLE")
+      return res.status(404).json({ error: "Device not found" });
+    console.error("Revoke device error:", err.message);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// DELETE /api/auth/devices — sign out every other device (keep current one)
+exports.revokeAllOtherDevices = async (req, res) => {
+  try {
+    const [result] = await db.query(
+      `UPDATE device_sessions
+       SET revoked = 1, revoked_at = NOW()
+       WHERE user_id = ? AND revoked = 0
+         AND (session_token IS NULL OR session_token <> ?)`,
+      [req.user.id, req.user.sid || ""],
+    );
+    res.json({
+      message: "All other devices signed out",
+      count: result.affectedRows,
+    });
+  } catch (err) {
+    if (err.code === "ER_NO_SUCH_TABLE") return res.json({ count: 0 });
+    console.error("Revoke all devices error:", err.message);
     res.status(500).json({ error: "Server error" });
   }
 };

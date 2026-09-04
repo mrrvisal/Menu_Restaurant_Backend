@@ -57,6 +57,11 @@ router.get("/auth/verify-email", authCtrl.verifyEmail);
 router.post("/auth/resend-verification", authCtrl.resendVerification);
 router.post("/auth/forgot-password", authCtrl.forgotPassword);
 router.post("/auth/reset-password", authCtrl.resetPassword);
+// ─── DEVICE SESSIONS (see + revoke every device on the account) ───
+router.get("/auth/devices", auth, authCtrl.listDevices);
+router.get("/auth/devices/history", auth, authCtrl.listLoginHistory);
+router.delete("/auth/devices", auth, authCtrl.revokeAllOtherDevices);
+router.delete("/auth/devices/:id", auth, authCtrl.revokeDevice);
 router.get("/auth/me", auth, authCtrl.me);
 router.get("/auth/link-code", auth, authCtrl.getLinkCode);
 router.patch("/auth/unlink-telegram", auth, authCtrl.unlinkTelegram);
@@ -396,14 +401,17 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
     const force = req.query.force === "1" || req.query.force === "true";
 
     // 🔍 Check if QR code already exists for this restaurant + table.
-    // If it exists AND the restaurant has a logo, regenerate using the current
-    // logo so the embedded logo stays dynamic. If force, always regenerate.
+    // Once an owner has "made done" a table's QR, the SAME table number can
+    // NOT be made again — the stored QR is always returned as-is (even if the
+    // restaurant has a logo). Regenerating is only possible explicitly with
+    // ?force=1 (used to refresh the embedded logo after a logo change), and
+    // that path upserts the stored row instead of creating a duplicate.
     if (restaurantId && !force) {
       const [existing] = await db.query(
         "SELECT qr_data_url, qr_url, created_at FROM qr_codes WHERE restaurant_id = ? AND table_no = ?",
         [restaurantId, tableNumber],
       );
-      if (existing.length && !restaurantLogo) {
+      if (existing.length) {
         return res.json({
           success: true,
           tableNumber,
@@ -535,6 +543,161 @@ router.get("/qr/table/:number", softAuth, async (req, res) => {
       }
     }
     res.status(500).json({ error: "Failed to generate QR code" });
+  }
+});
+
+// ─── SAVED QR CODES (owner) ────────────────────────────────
+// Every generated table QR is stored in `qr_codes`. These endpoints let the
+// owner browse / search / preview / download the QRs they already made.
+// A table number that was "made done" can never be generated again —
+// see /qr/table/:number above which always returns the stored QR.
+
+// GET /api/qr/codes?restaurant_id=X&search=12 — metadata list of saved QRs
+router.get("/qr/codes", auth, async (req, res) => {
+  try {
+    const requested = parseInt(req.query.restaurant_id || 0);
+    let ids;
+    if (req.user.role === "super_admin") {
+      ids = requested ? [requested] : null; // null = every restaurant
+    } else {
+      const [owned] = await db.query(
+        "SELECT id FROM restaurants WHERE owner_id = ?",
+        [req.user.id],
+      );
+      const ownedIds = owned.map((r) => r.id);
+      if (requested) {
+        if (!ownedIds.includes(requested))
+          return res
+            .status(404)
+            .json({ error: "Restaurant not found or not owned by you" });
+        ids = [requested];
+      } else {
+        ids = ownedIds;
+      }
+    }
+    if (ids && !ids.length) return res.json([]);
+
+    // Search is by table number (digits only, partial match allowed)
+    const search = String(req.query.search || "").replace(/[^0-9]/g, "");
+    let sql =
+      "SELECT id, restaurant_id, table_no, qr_url, created_at FROM qr_codes";
+    const where = [];
+    const params = [];
+    if (ids) {
+      where.push("restaurant_id IN (?)");
+      params.push(ids);
+    }
+    if (search) {
+      where.push("CAST(table_no AS CHAR) LIKE ?");
+      params.push(`%${search}%`);
+    }
+    if (where.length) sql += " WHERE " + where.join(" AND ");
+    sql += " ORDER BY table_no ASC";
+    const [rows] = await db.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    if (err.code === "ER_NO_SUCH_TABLE") return res.json([]);
+    console.error("Saved QR list error:", err.message);
+    res.status(500).json({ error: "Failed to load saved QR codes" });
+  }
+});
+
+// GET /api/qr/codes/:tableNo?restaurant_id=X — one saved QR (with image data
+// URL) used by the admin UI for preview and download.
+router.get("/qr/codes/:tableNo", auth, async (req, res) => {
+  try {
+    const tableNo = parseInt(req.params.tableNo);
+    if (!tableNo || isNaN(tableNo))
+      return res.status(400).json({ error: "Invalid table number" });
+
+    const requested = parseInt(req.query.restaurant_id || 0);
+    let ids;
+    if (req.user.role === "super_admin") {
+      ids = requested ? [requested] : null;
+    } else {
+      const [owned] = await db.query(
+        "SELECT id FROM restaurants WHERE owner_id = ?",
+        [req.user.id],
+      );
+      const ownedIds = owned.map((r) => r.id);
+      if (requested) {
+        if (!ownedIds.includes(requested))
+          return res
+            .status(404)
+            .json({ error: "Restaurant not found or not owned by you" });
+        ids = [requested];
+      } else {
+        ids = ownedIds;
+      }
+    }
+    if (ids && !ids.length)
+      return res.status(404).json({ error: "QR code not found" });
+
+    let sql =
+      "SELECT id, restaurant_id, table_no, qr_url, qr_data_url, created_at FROM qr_codes WHERE table_no = ?";
+    const params = [tableNo];
+    if (ids) {
+      sql += " AND restaurant_id IN (?)";
+      params.push(ids);
+    }
+    const [rows] = await db.query(sql, params);
+    if (!rows.length)
+      return res.status(404).json({ error: "QR code not found" });
+    res.json(rows[0]);
+  } catch (err) {
+    if (err.code === "ER_NO_SUCH_TABLE")
+      return res.status(404).json({ error: "QR code not found" });
+    console.error("Saved QR get error:", err.message);
+    res.status(500).json({ error: "Failed to load QR code" });
+  }
+});
+
+// DELETE /api/qr/codes/:tableNo?restaurant_id=X — owner deletes a saved QR.
+// After deletion the table number is free again and can be generated anew.
+router.delete("/qr/codes/:tableNo", auth, async (req, res) => {
+  try {
+    const tableNo = parseInt(req.params.tableNo);
+    if (!tableNo || isNaN(tableNo))
+      return res.status(400).json({ error: "Invalid table number" });
+
+    const requested = parseInt(req.query.restaurant_id || 0);
+    let ids;
+    if (req.user.role === "super_admin") {
+      ids = requested ? [requested] : null;
+    } else {
+      const [owned] = await db.query(
+        "SELECT id FROM restaurants WHERE owner_id = ?",
+        [req.user.id],
+      );
+      const ownedIds = owned.map((r) => r.id);
+      if (requested) {
+        if (!ownedIds.includes(requested))
+          return res
+            .status(404)
+            .json({ error: "Restaurant not found or not owned by you" });
+        ids = [requested];
+      } else {
+        ids = ownedIds;
+      }
+    }
+    if (ids && !ids.length)
+      return res.status(404).json({ error: "QR code not found" });
+
+    let sql = "DELETE FROM qr_codes WHERE table_no = ?";
+    const params = [tableNo];
+    if (ids) {
+      sql += " AND restaurant_id IN (?)";
+      params.push(ids);
+    }
+    const [result] = await db.query(sql, params);
+    if (!result.affectedRows)
+      return res.status(404).json({ error: "QR code not found" });
+    res.json({ success: true, message: "QR code deleted" });
+  } catch (err) {
+    if (err.code === "ER_NO_SUCH_TABLE")
+      return res.status(404).json({ error: "QR code not found" });
+    console.error("Saved QR delete error:", err.message);
+    res.status(500).json({ error: "Failed to delete QR code" });
   }
 });
 
