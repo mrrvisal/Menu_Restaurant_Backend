@@ -127,28 +127,32 @@ router.get("/orders/stream", (req, res, next) => {
   }
   auth(req, res, () => requireOwnerOrAdmin(req, res, next));
 }, (req, res) => {
-  // Determine restaurant id from the query param or the owner's first restaurant
-  const fetchRestaurant = () => {
+  // Resolve the restaurant(s) to stream: the requested one when
+  // restaurant_id is supplied (must be owned by the caller), otherwise EVERY
+  // restaurant the account owns — so multi-restaurant owners never miss
+  // orders, and the stream follows the restaurant selected in the dashboard
+  // when the client passes one.
+  const fetchRestaurants = () => {
     const requested = parseInt(req.query.restaurant_id || 0);
     if (requested) {
-      return db
-        .query(
-          "SELECT id FROM restaurants WHERE id = ? AND owner_id = ?",
-          [requested, req.user.id],
-        )
-        .then(([rows]) => (rows.length ? [{ id: rows[0].id }] : []));
+      return db.query(
+        "SELECT id FROM restaurants WHERE id = ? AND owner_id = ?",
+        [requested, req.user.id],
+      );
     }
     return db.query(
-      "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
+      "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC",
       [req.user.id],
     );
   };
 
-  fetchRestaurant().then(([rows]) => {
+  fetchRestaurants().then(([rows]) => {
     if (!rows.length) {
-      return res.status(404).json({ error: "Restaurant not found" });
+      return res
+        .status(404)
+        .json({ error: "No restaurant found for this account" });
     }
-    const restaurantId = rows[0].id;
+    const restaurantIds = rows.map((r) => r.id);
 
     // Headers for SSE
     res.writeHead(200, {
@@ -158,18 +162,24 @@ router.get("/orders/stream", (req, res, next) => {
       "X-Accel-Buffering": "no",
     });
 
-    // Send initial heartbeat so client knows the stream is live
-    res.write(`event: connected\ndata: {"message":"stream connected"}\n\n`);
+    // Send initial event so client knows the stream is live (and for which
+    // restaurants)
+    res.write(
+      `event: connected\ndata: ${JSON.stringify({
+        message: "stream connected",
+        restaurantIds,
+      })}\n\n`,
+    );
 
     // Periodic keep-alive comment (prevents proxy timeouts)
     const heartbeat = setInterval(() => {
       res.write(`: heartbeat\n\n`);
     }, 25000);
 
-    // Register this client
-    addClient(restaurantId, res);
+    // Register this client for every streamed restaurant
+    restaurantIds.forEach((id) => addClient(id, res));
 
-    // Cleanup interval on close
+    // Cleanup interval on close (addClient removes the res from each set)
     res.on("close", () => {
       clearInterval(heartbeat);
     });
