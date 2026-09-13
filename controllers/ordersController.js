@@ -2,6 +2,7 @@
 const db = require("../config/db");
 const { sendOrderNotification } = require("../services/telegramBot");
 const { broadcast } = require("../services/sse");
+const { logActivity } = require("../helpers/audit");
 
 // POST /api/orders - Place order (guest)
 exports.create = async (req, res) => {
@@ -233,12 +234,15 @@ exports.updateStatus = async (req, res) => {
     return res.status(400).json({ error: "Invalid status" });
 
   try {
-    const [order] = await db.query(
-      "SELECT o.id FROM orders o JOIN restaurants r ON r.id = o.restaurant_id WHERE o.id = ? AND r.owner_id = ?",
-      [req.params.id, req.user.id],
-    );
-    if (!order.length)
-      return res.status(404).json({ error: "Order not found" });
+    // Owners may only touch their own orders; super admins manage ANY order.
+    if (req.user.role !== "super_admin") {
+      const [order] = await db.query(
+        "SELECT o.id FROM orders o JOIN restaurants r ON r.id = o.restaurant_id WHERE o.id = ? AND r.owner_id = ?",
+        [req.params.id, req.user.id],
+      );
+      if (!order.length)
+        return res.status(404).json({ error: "Order not found" });
+    }
 
     await db.query("UPDATE orders SET status = ? WHERE id = ?", [
       status,
@@ -257,6 +261,14 @@ exports.updateStatus = async (req, res) => {
         tableNo: orderRows[0].table_no,
       });
     }
+
+    logActivity({
+      userId: req.user.id,
+      action: "order_status",
+      description: `Order #${req.params.id} (table ${orderRows[0]?.table_no || "?"}) → ${status}`,
+      ipAddress: req.ip,
+      restaurantId: orderRows[0]?.restaurant_id,
+    });
 
     res.json({ success: true, id: parseInt(req.params.id), status });
   } catch (err) {

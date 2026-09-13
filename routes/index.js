@@ -19,6 +19,7 @@ const ordersCtrl = require("../controllers/ordersController");
 const telegramCtrl = require("../controllers/telegramController");
 const { addClient } = require("../services/sse");
 const db = require("../config/db");
+const { logActivity } = require("../helpers/audit");
 
 // ─── FILE UPLOAD CONFIG ────────────────────────────────────
 const storage = multer.memoryStorage();
@@ -51,6 +52,8 @@ router.get("/restaurants/:id", ordersCtrl.getRestaurant);
 
 // ─── AUTH ROUTES ───────────────────────────────────────────
 router.post("/auth/register", upload.single("logo"), authCtrl.register);
+// Dedicated Super Admin login — the ONLY entry point for super_admin accounts.
+router.post("/auth/login/super-admin", authCtrl.superAdminLogin);
 router.post("/auth/login", authCtrl.login);
 router.post("/auth/google", authCtrl.googleLogin);
 router.get("/auth/verify-email", authCtrl.verifyEmail);
@@ -63,6 +66,8 @@ router.get("/auth/devices/history", auth, authCtrl.listLoginHistory);
 router.delete("/auth/devices", auth, authCtrl.revokeAllOtherDevices);
 router.delete("/auth/devices/:id", auth, authCtrl.revokeDevice);
 router.get("/auth/me", auth, authCtrl.me);
+// Logged-in user changes their OWN email and/or password (current password required)
+router.patch("/auth/account", auth, authCtrl.updateAccount);
 router.get("/auth/link-code", auth, authCtrl.getLinkCode);
 router.patch("/auth/unlink-telegram", auth, authCtrl.unlinkTelegram);
 router.patch("/auth/language", auth, authCtrl.updateLanguage);
@@ -202,9 +207,10 @@ router.get("/admin/users", auth, requireSuperAdmin, async (req, res) => {
   try {
     const [rows] = await db.query(
       `SELECT u.id, u.email, u.role, u.status, u.email_verified_at, u.last_login_at, u.created_at,
-              r.name AS restaurant_name
+              GROUP_CONCAT(DISTINCT r.name ORDER BY r.name SEPARATOR ', ') AS restaurant_name
        FROM users u
        LEFT JOIN restaurants r ON r.owner_id = u.id
+       GROUP BY u.id
        ORDER BY u.created_at DESC`,
     );
     res.json(rows);
@@ -228,8 +234,50 @@ router.patch(
         status,
         req.params.id,
       ]);
+      logActivity({
+        userId: req.user.id,
+        action: "user_status",
+        description: `Changed user #${req.params.id} status → ${status}`,
+        ipAddress: req.ip,
+      });
       res.json({ success: true });
     } catch (err) {
+      res.status(500).json({ error: "Server error" });
+    }
+  },
+);
+
+// Super Admin: change a user's role (owner <-> super_admin)
+router.patch(
+  "/admin/users/:id/role",
+  auth,
+  requireSuperAdmin,
+  async (req, res) => {
+    const { role } = req.body;
+    if (!["owner", "super_admin"].includes(role)) {
+      return res.status(400).json({ error: "Invalid role" });
+    }
+    // Safety: a super admin cannot change their own role (avoid lockout)
+    if (parseInt(req.params.id) === req.user.id) {
+      return res.status(400).json({ error: "You cannot change your own role" });
+    }
+    try {
+      const [result] = await db.query("UPDATE users SET role = ? WHERE id = ?", [
+        role,
+        req.params.id,
+      ]);
+      if (!result.affectedRows) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      logActivity({
+        userId: req.user.id,
+        action: "user_role",
+        description: `Changed user #${req.params.id} role → ${role}`,
+        ipAddress: req.ip,
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Admin change role error:", err);
       res.status(500).json({ error: "Server error" });
     }
   },
@@ -256,6 +304,12 @@ router.post(
         "UPDATE users SET email_verified_at = NOW(), email_verify_token = NULL, status = 'active' WHERE id = ?",
         [req.params.id],
       );
+      logActivity({
+        userId: req.user.id,
+        action: "user_verified",
+        description: `Verified email for user ${rows[0].email}`,
+        ipAddress: req.ip,
+      });
       res.json({ success: true, message: "User email verified successfully" });
     } catch (err) {
       console.error("Admin verify user error:", err);
@@ -335,10 +389,105 @@ router.post(
   },
 );
 
+// Super Admin: recent login history fora user (from device_login_history audit trail))
+router.get(
+  "/admin/users/:id/login-history",
+  auth,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const [rows] = await db.query(
+        `SELECT id, device_name AS deviceName, method, ip_address AS ipAddress,
+                city, region, country, browser, os, created_at AS createdAt
+         FROM device_login_history
+         WHERE user_id = ?
+         ORDER BY id DESC
+         LIMIT 15`,
+        [req.params.id],
+      );
+      res.json(rows);
+    } catch (err) {
+      if (err.code === "ER_NO_SUCH_TABLE") return res.json([]);
+      console.error("Admin login history error:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  },
+);
+
+// Super Admin: reset a user's password to a temporary one (returned once)
+router.post(
+  "/admin/users/:id/reset-password",
+  auth,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const [rows] = await db.query("SELECT id FROM users WHERE id = ?", [
+        req.params.id,
+      ]);
+      if (!rows.length)
+        return res.status(404).json({ error: "User not found" });
+
+      // Readable 10-char temp password (avoid 0/O, 1/l/I ambiguities)
+      const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+      let tempPassword = "";
+      for (let i = 0; i < 10; i++)
+        tempPassword += chars.charAt(Math.floor(Math.random() * chars.length));
+      const bcrypt = require("bcryptjs");
+      const hash = await bcrypt.hash(tempPassword, 10);
+      await db.query("UPDATE users SET password = ? WHERE id = ?", [
+        hash,
+        req.params.id,
+      ]);
+      logActivity({
+        userId: req.user.id,
+        action: "password_reset_admin",
+        description: `Admin reset password for user #${req.params.id}`,
+        ipAddress: req.ip,
+      });
+      res.json({ success: true, tempPassword });
+    } catch (err) {
+      console.error("Admin reset password error:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  },
+);
+
+// Super Admin: deletea user account (cascades their restaurants, menus, foods, orders))
+router.delete(
+  "/admin/users/:id",
+  auth,
+  requireSuperAdmin,
+  async (req, res) => {
+    // Never allow deleting your own account (would lock the system out)
+    if (parseInt(req.params.id) === req.user.id) {
+      return res.status(400).json({ error: "You cannot delete your own account" });
+    }
+    try {
+      const [result] = await db.query("DELETE FROM users WHERE id = ?", [
+        req.params.id,
+      ]);
+      if (!result.affectedRows)
+        return res.status(404).json({ error: "User not found" });
+      logActivity({
+        userId: req.user.id,
+        action: "user_deleted",
+        description: `Deleted user #${req.params.id}`,
+        ipAddress: req.ip,
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Admin delete user error:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  },
+);
+
 router.get("/admin/restaurants", auth, requireSuperAdmin, async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT r.*, u.email AS owner_email
+      `SELECT r.*, u.email AS owner_email,
+              (SELECT COUNT(*) FROM orders o WHERE o.restaurant_id = r.id) AS orders_count,
+              (SELECT COUNT(*) FROM foods f WHERE f.restaurant_id = r.id) AS foods_count
        FROM restaurants r
        JOIN users u ON u.id = r.owner_id
        ORDER BY r.created_at DESC`,
@@ -348,6 +497,38 @@ router.get("/admin/restaurants", auth, requireSuperAdmin, async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
+// Super Admin: suspend / activate / deactivate a restaurant
+router.patch(
+  "/admin/restaurants/:id/status",
+  auth,
+  requireSuperAdmin,
+  async (req, res) => {
+    const { status } = req.body;
+    if (!["active", "inactive", "suspended"].includes(status)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+    try {
+      const [result] = await db.query(
+        "UPDATE restaurants SET status = ? WHERE id = ?",
+        [status, req.params.id],
+      );
+      if (!result.affectedRows) {
+        return res.status(404).json({ error: "Restaurant not found" });
+      }
+      logActivity({
+        userId: req.user.id,
+        action: "restaurant_status",
+        description: `Changed restaurant #${req.params.id} status → ${status}`,
+        ipAddress: req.ip,
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Admin restaurant status error:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  },
+);
 
 router.get("/admin/stats", auth, requireSuperAdmin, async (req, res) => {
   try {
@@ -363,8 +544,120 @@ router.get("/admin/stats", auth, requireSuperAdmin, async (req, res) => {
     const [[{ totalFoods }]] = await db.query(
       "SELECT COUNT(*) AS totalFoods FROM foods",
     );
-    res.json({ totalUsers, totalRestaurants, totalOrders, totalFoods });
+    const [[{ todayOrders }]] = await db.query(
+      "SELECT COUNT(*) AS todayOrders FROM orders WHERE created_at >= CURDATE()",
+    );
+    const [[{ revenue }]] = await db.query(
+      "SELECT COALESCE(SUM(total), 0) AS revenue FROM orders",
+    );
+    const [[{ unverifiedUsers }]] = await db.query(
+      "SELECT COUNT(*) AS unverifiedUsers FROM users WHERE email_verified_at IS NULL",
+    );
+    const [[{ pendingOrders }]] = await db.query(
+      "SELECT COUNT(*) AS pendingOrders FROM orders WHERE status = 'pending'",
+    );
+    res.json({
+      totalUsers,
+      totalRestaurants,
+      totalOrders,
+      totalFoods,
+      todayOrders,
+      revenue,
+      unverifiedUsers,
+      pendingOrders,
+    });
   } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Super Admin: global order feed (all restaurants, optional status filter)
+router.get("/admin/orders", auth, requireSuperAdmin, async (req, res) => {
+  try {
+    const status = req.query.status;
+    const limit = Math.min(parseInt(req.query.limit || 100, 10), 500);
+    const filters = [limit];
+    let whereClause = "";
+    if (status && ["pending", "confirmed", "preparing", "ready", "served", "cancelled"].includes(status)) {
+      whereClause = "WHERE o.status = ? ";
+      filters.unshift(status);
+    }
+    const [rows] = await db.query(
+      `SELECT o.id, o.restaurant_id, o.table_no AS tableNo, o.customer_name AS customerName,
+              o.items, o.note, o.total, o.status, o.created_at AS createdAt,
+              r.name AS restaurant_name
+       FROM orders o
+       JOIN restaurants r ON r.id = o.restaurant_id
+       ${whereClause}
+       ORDER BY o.created_at DESC
+       LIMIT ?`,
+      filters,
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Admin orders error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Super Admin: consolidated ACCESS + ACTIVITY feed across ALL users
+// Session heartbeat (last_active_at) comes from middleware/auth throttled updates.
+router.get("/admin/access", auth, requireSuperAdmin, async (req, res) => {
+  try {
+    // ── Summary stats ──────────────────────────────────────────
+    const [[stats]] = await db.query(
+      `SELECT
+         (SELECT COUNT(*) FROM device_login_history)                  AS totalLogins,
+         (SELECT COUNT(*) FROM device_login_history WHERE created_at >= CURDATE()) AS loginsToday,
+         (SELECT COUNT(DISTINCT user_id) FROM device_login_history WHERE created_at >= CURDATE()) AS usersToday,
+         (SELECT COUNT(*) FROM device_sessions WHERE revoked = 0)     AS activeSessions,
+         (SELECT COUNT(*) FROM device_sessions WHERE revoked = 1)     AS revokedSessions,
+         (SELECT COUNT(*) FROM device_sessions
+          WHERE revoked = 0 AND last_active_at >= (NOW() - INTERVAL 15 MINUTE)) AS onlineNow
+       FROM dual`,
+    );
+
+    // ── Current live sessions (every device logged in, anything sent recent heartbeat) ──
+    const [sessions] = await db.query(
+      `SELECT ds.id, ds.device_id AS deviceId, ds.device_name AS deviceName,
+              ds.device_type AS deviceType, ds.browser, ds.browser_version AS browserVersion,
+              ds.os, ds.screen, ds.timezone, ds.language, ds.platform, ds.hardware,
+              ds.ip_address AS ipAddress, ds.city, ds.region, ds.country,
+              ds.login_count AS loginCount, ds.last_active_at AS lastActiveAt,
+              ds.last_login_at AS lastLoginAt, ds.revoked, ds.revoked_at AS revokedAt,
+              u.email, u.full_name AS fullName, u.role, u.status AS userStatus
+       FROM device_sessions ds
+       LEFT JOIN users u ON u.id = ds.user_id
+       ORDER BY ds.last_active_at DESC
+       LIMIT 200`,
+    );
+
+    // ── Recent login history (every login event across all users) ──
+    const [logins] = await db.query(
+      `SELECT dlh.id, dlh.device_id AS deviceId, dlh.device_name AS deviceName,
+              dlh.method, dlh.ip_address AS ipAddress, dlh.city, dlh.region, dlh.country,
+              dlh.browser, dlh.os, dlh.asn, dlh.created_at AS createdAt,
+              u.email, u.full_name AS fullName, u.role
+       FROM device_login_history dlh
+       LEFT JOIN users u ON u.id = dlh.user_id
+       ORDER BY dlh.id DESC
+       LIMIT 200`,
+    );
+
+    // ── Recent actions (audit trail of what users did) ──
+    const [activities] = await db.query(
+      `SELECT al.id, al.action, al.description, al.ip_address AS ipAddress,
+              al.created_at AS createdAt,
+              u.email, u.full_name AS fullName, u.role
+       FROM activity_logs al
+       LEFT JOIN users u ON u.id = al.user_id
+       ORDER BY al.id DESC
+       LIMIT 100`,
+    );
+
+    res.json({ stats, sessions, logins, activities });
+  } catch (err) {
+    console.error("Admin access error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });

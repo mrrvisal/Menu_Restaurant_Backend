@@ -6,6 +6,7 @@ const crypto = require("crypto");
 const imagekit = require("../config/imagekit");
 const { sendMail } = require("../config/mailer");
 const { validatePassword } = require("../helpers/passwordPolicy");
+const { logActivity } = require("../helpers/audit");
 const {
   extractDeviceInfo,
   lookupIpLocation,
@@ -257,6 +258,12 @@ exports.register = async (req, res) => {
     }).catch(err => console.error("Background email send failed:", err.message));
 
     // Don't return a token — user must verify email first
+    logActivity({
+      userId,
+      action: "register",
+      description: `New ${role} account registered: ${email.trim()}`,
+      ipAddress: req.ip,
+    });
     res.status(201).json({
       token: null,
       user: null,
@@ -271,53 +278,90 @@ exports.register = async (req, res) => {
 };
 
 // ─── LOGIN ──────────────────────────────────────────────────
-exports.login = async (req, res) => {
-  const { email, password } = req.body;
+// Shared credential check for BOTH login entries:
+//   • POST /api/auth/login               → owners only
+//   • POST /api/auth/login/super-admin   → super admins only
+// The role gate guarantees a super admin can ONLY obtain a session through the
+// dedicated Super Admin portal endpoint (returned as `code` so the frontend can
+// render a helpful redirect instead of a generic "Invalid credentials").
+async function attemptLogin(
+  req,
+  email,
+  password,
+  { requireSuperAdmin = false } = {},
+) {
   if (!email || !password)
-    return res.status(400).json({ error: "Email and password required" });
+    return { status: 400, error: "Email and password required" };
 
-  try {
-    const [rows] = await db.query(
-      `SELECT u.* FROM users u WHERE u.email = ?`,
-      [email],
-    );
-    if (!rows.length)
-      return res.status(401).json({ error: "Invalid credentials" });
+  const [rows] = await db.query(
+    `SELECT u.* FROM users u WHERE u.email = ?`,
+    [email],
+  );
+  if (!rows.length) return { status: 401, error: "Invalid credentials" };
 
-    const user = rows[0];
-    const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(401).json({ error: "Invalid credentials" });
+  const user = rows[0];
+  const match = await bcrypt.compare(password, user.password);
+  if (!match) return { status: 401, error: "Invalid credentials" };
 
-    if (user.status === "suspended")
-      return res
-        .status(403)
-        .json({ error: "Your account has been suspended. Contact support." });
-    if (user.status === "inactive" && !user.email_verified_at) {
-      return res
-        .status(403)
-        .json({ error: "Please verify your email before logging in." });
-    }
+  // ── Role gating — super admins can ONLY sign in via the dedicated route ──
+  if (requireSuperAdmin && user.role !== "super_admin") {
+    return {
+      status: 403,
+      error: "This account is not a super admin.",
+      code: "not_super_admin",
+    };
+  }
+  if (!requireSuperAdmin && user.role === "super_admin") {
+    return {
+      status: 401,
+      error:
+        "Super admin accounts must sign in via the dedicated Super Admin portal (/login/super-admin).",
+      code: "super_admin_use_dedicated_route",
+    };
+  }
 
-    // Update last login
-    await db.query("UPDATE users SET last_login_at = NOW() WHERE id = ?", [
-      user.id,
-    ]);
+  if (user.status === "suspended") {
+    return {
+      status: 403,
+      error: "Your account has been suspended. Contact support.",
+    };
+  }
+  if (user.status === "inactive" && !user.email_verified_at) {
+    return {
+      status: 403,
+      error: "Please verify your email before logging in.",
+    };
+  }
 
-    // Fetch ALL restaurants owned by this account
-    const [restaurants] = await db.query(
-      `SELECT id, name, logo_url AS logoUrl, telegram_chat_id AS telegramChatId,
-              telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
-              theme_color AS themeColor,
-              sidebar_position AS sidebarPosition,
-              status
-       FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
-      [user.id],
-    );
+  // Update last login
+  await db.query("UPDATE users SET last_login_at = NOW() WHERE id = ?", [
+    user.id,
+  ]);
 
-    const sid = await upsertDeviceSession(req, user, "email");
-    const token = generateToken(user, sid);
+  // Fetch ALL restaurants owned by this account
+  const [restaurants] = await db.query(
+    `SELECT id, name, logo_url AS logoUrl, telegram_chat_id AS telegramChatId,
+            telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
+            theme_color AS themeColor,
+            sidebar_position AS sidebarPosition,
+            status
+     FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
+    [user.id],
+  );
 
-    res.json({
+  const method = requireSuperAdmin ? "super_admin_login" : "email";
+  const sid = await upsertDeviceSession(req, user, method);
+  const token = generateToken(user, sid);
+
+  logActivity({
+    userId: user.id,
+    action: "login",
+    description: `${requireSuperAdmin ? "Super admin" : "Owner"} logged in (${method}): ${user.email}`,
+    ipAddress: req.ip,
+  });
+
+  return {
+    data: {
       token,
       user: {
         id: user.id,
@@ -326,9 +370,43 @@ exports.login = async (req, res) => {
         emailVerified: !!user.email_verified_at,
       },
       restaurants,
-    });
+    },
+  };
+}
+
+// Owner / regular account login (super admins are rejected here on purpose —
+// they must use /api/auth/login/super-admin via the /login/super-admin page).
+exports.login = async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const result = await attemptLogin(req, email, password);
+    if (result.error)
+      return res.status(result.status).json({
+        error: result.error,
+        ...(result.code ? { code: result.code } : {}),
+      });
+    res.json(result.data);
   } catch (err) {
     console.error("Login error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// Dedicated Super Admin login — ONLY accounts with role = super_admin pass.
+exports.superAdminLogin = async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const result = await attemptLogin(req, email, password, {
+      requireSuperAdmin: true,
+    });
+    if (result.error)
+      return res.status(result.status).json({
+        error: result.error,
+        ...(result.code ? { code: result.code } : {}),
+      });
+    res.json(result.data);
+  } catch (err) {
+    console.error("Super admin login error:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -564,6 +642,150 @@ exports.me = async (req, res) => {
     });
   } catch (err) {
     console.error("Me error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// ─── UPDATE ACCOUNT (email / password) ──────────────────────
+// Lets a logged-in user change their OWN email address and/or password.
+//   • Email change  → a fresh verification token is issued, the address is
+//     marked unverified and the account returns to `inactive` until the NEW
+//     email is verified (protects against typo'd addresses locking the owner
+//     out of their account).
+//   • Password change → re-hashed with bcrypt (same policy as registration).
+//   • Both changes require the CURRENT password, except for accounts that have
+//     no password set (Google-only signups) — their session is the proof.
+// A fresh JWT is returned because the old one carries the stale email.
+exports.updateAccount = async (req, res) => {
+  const { email, currentPassword, newPassword } = req.body;
+  try {
+    const [rows] = await db.query(
+      "SELECT id, email, password, email_verified_at, status FROM users WHERE id = ?",
+      [req.user.id],
+    );
+    if (!rows.length) return res.status(404).json({ error: "User not found" });
+    const user = rows[0];
+
+    const newEmail = email && typeof email === "string" ? email.trim().toLowerCase() : "";
+    const wantsEmail = newEmail && newEmail !== user.email.toLowerCase();
+    const wantsPassword = !!(newPassword && String(newPassword).trim().length > 0);
+
+    if (!wantsEmail && !wantsPassword)
+      return res.status(400).json({ error: "No changes requested" });
+
+    // ── Verify the current password (skip only if account has none) ──
+    if (user.password) {
+      if (!currentPassword)
+        return res.status(400).json({ error: "Current password is required" });
+      const match = await bcrypt.compare(currentPassword, user.password);
+      if (!match)
+        return res.status(401).json({ error: "Current password is incorrect" });
+    }
+
+    // ── Email change ──
+    let verifyToken = null;
+    if (wantsEmail) {
+      const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!EMAIL_RE.test(newEmail))
+        return res.status(400).json({ error: "Please enter a valid email address" });
+
+      const [dupes] = await db.query(
+        "SELECT id FROM users WHERE email = ? AND id <> ?",
+        [newEmail, user.id],
+      );
+      if (dupes.length)
+        return res.status(400).json({ error: "This email is already in use" });
+
+      verifyToken = crypto.randomBytes(32).toString("hex");
+      await db.query(
+        "UPDATE users SET email = ?, email_verify_token = ?, email_verified_at = NULL, status = 'inactive' WHERE id = ?",
+        [newEmail, verifyToken, user.id],
+      );
+
+      const verifyUrl = `${FRONTEND_URL}/verify-email?token=${verifyToken}`;
+      const html = [
+        '<div style="font-family: Arial, Helvetica, sans-serif; max-width: 520px; margin: 0 auto; border: 1px solid #e5e7eb; border-radius: 14px; overflow: hidden;">',
+        '<div style="background: linear-gradient(135deg, #166534, #14532d); padding: 22px 0; text-align: center;">',
+        '<h2 style="color: #fff; margin: 0; font-size: 18px;">Verify your NEW email address</h2>',
+        "</div>",
+        '<div style="padding: 28px;">',
+        '<p style="color: #4a6650; line-height: 1.6; margin-bottom: 20px;">',
+        `Your account email was recently changed to <strong>${newEmail}</strong>.`,
+        "Please verify this new address to keep your account active.",
+        "</p>",
+        '<div style="text-align: center; margin-bottom: 24px;">',
+        `<a href="${verifyUrl}" style="display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #166534, #22c55e); color: white; text-decoration: none; border-radius: 10px; font-weight: 700; font-size: 14px;">`,
+        "Verify Email Address",
+        "</a>",
+        "</div>",
+        '<p style="color: #6b7280; font-size: 12px; text-align: center;">',
+        "Or copy this link into your browser:<br/>",
+        `<a href="${verifyUrl}" style="color: #22c55e; word-break: break-all;">${verifyUrl}</a>`,
+        "</p>",
+        '<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;" />',
+        '<p style="color: #9ca3af; font-size: 11px; text-align: center;">',
+        "This link expires in 24 hours. If you didn't make this change, please contact support.",
+        "</p>",
+        "</div>",
+        "</div>",
+      ].join("");
+      sendMail({
+        to: newEmail,
+        subject: "Verify your new email - Digital Menu",
+        html,
+      }).catch((err) => console.error("Background email send failed:", err.message));
+    }
+
+    // ── Password change ──
+    if (wantsPassword) {
+      const pwCheck = validatePassword(String(newPassword));
+      if (!pwCheck.valid)
+        return res.status(400).json({
+          error: "Password must contain: " + pwCheck.errors.join(", "),
+        });
+      const hashedPassword = await bcrypt.hash(String(newPassword), 10);
+      await db.query("UPDATE users SET password = ? WHERE id = ?", [
+        hashedPassword,
+        user.id,
+      ]);
+    }
+
+    // ── Refresh session with a token that carries the current email ──
+    const [freshRows] = await db.query(
+      "SELECT id, email, role, email_verified_at, status, created_at FROM users WHERE id = ?",
+      [req.user.id],
+    );
+    const fresh = freshRows[0];
+    // Keep the same device session (sid) so this device stays signed in and
+    // remains revocable from the Devices panel.
+    const token = generateToken(fresh, req.user.sid);
+
+    logActivity({
+      userId: user.id,
+      action: "update_account",
+      description: `Account email/password updated for: ${fresh.email}`,
+      ipAddress: req.ip,
+    });
+
+    res.json({
+      token,
+      user: {
+        id: fresh.id,
+        email: fresh.email,
+        role: fresh.role,
+        emailVerified: !!fresh.email_verified_at,
+        status: fresh.status,
+        createdAt: fresh.created_at,
+      },
+      message:
+        wantsEmail && wantsPassword
+          ? "Email and password updated. Please verify your new email address."
+          : wantsEmail
+            ? "Email updated. A verification link was sent to your new address."
+            : "Password updated successfully.",
+    });
+  } catch (err) {
+    console.error("Update account error:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -933,6 +1155,25 @@ exports.googleLogin = async (req, res) => {
         .status(403)
         .json({ error: "Your account has been suspended. Contact support." });
 
+    // ── Role gating (same rule as email/password login) ──
+    // The regular login pages can't create a session for a super admin, and the
+    // dedicated Super Admin portal can't create one for a non-super-admin.
+    const superAdminOnly =
+      req.body.superAdminOnly === true || req.body.superAdminOnly === "true";
+    if (superAdminOnly && user.role !== "super_admin") {
+      return res.status(403).json({
+        error: "This account is not a super admin.",
+        code: "not_super_admin",
+      });
+    }
+    if (!superAdminOnly && user.role === "super_admin") {
+      return res.status(401).json({
+        error:
+          "Super admin accounts must sign in via the dedicated Super Admin portal (/login/super-admin).",
+        code: "super_admin_use_dedicated_route",
+      });
+    }
+
     // Update last login
     await db.query("UPDATE users SET last_login_at = NOW() WHERE id = ?", [
       user.id,
@@ -951,6 +1192,13 @@ exports.googleLogin = async (req, res) => {
 
     const sid = await upsertDeviceSession(req, user, "google");
     const token = generateToken(user, sid);
+
+    logActivity({
+      userId: user.id,
+      action: "google_login",
+      description: `User signed in with Google: ${user.email}`,
+      ipAddress: req.ip,
+    });
 
     res.json({
       token,
