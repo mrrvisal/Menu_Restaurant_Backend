@@ -48,4 +48,52 @@ function broadcast(restaurantId, event, data) {
   }
 }
 
-module.exports = { addClient, broadcast };
+// Map of orderId -> Set of connected tracking clients (guest order tracker)
+const orderClients = new Map();
+
+/**
+ * Add a guest tracking client for a single order
+ * @param {number} orderId - The order ID
+ * @param {object} res - The Express response object
+ */
+function addOrderClient(orderId, res) {
+  const key = Number(orderId);
+  if (!orderClients.has(key)) {
+    orderClients.set(key, new Set());
+  }
+  orderClients.get(key).add(res);
+
+  // Remove client when connection closes
+  res.on("close", () => {
+    const set = orderClients.get(key);
+    if (set) {
+      set.delete(res);
+      if (set.size === 0) {
+        orderClients.delete(key);
+      }
+    }
+  });
+}
+
+/**
+ * Emit an event to every guest tracking this single order
+ * @param {number} orderId - The order ID
+ * @param {string} event - The event name
+ * @param {object} data - The event data payload
+ */
+function emitOrder(orderId, event, data) {
+  const set = orderClients.get(Number(orderId));
+  if (!set || set.size === 0) return;
+
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of set) {
+    try {
+      client.write(payload);
+    } catch (err) {
+      console.error("SSE order emit error:", err.message);
+      set.delete(client);
+    }
+  }
+}
+
+module.exports = { addClient, broadcast, addOrderClient, emitOrder };

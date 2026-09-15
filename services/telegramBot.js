@@ -395,9 +395,9 @@ function getBot() {
 
 function buildOrderStatusKeyboard(orderId, currentStatus) {
   const statusFlow = [
-    { status: "preparing", label: "👨‍🍳 រៀបចំ", emoji: "👨‍🍳" },
-    { status: "ready", label: "🍽️ រួចរាល់", emoji: "🍽️" },
-    { status: "served", label: "✔️ បម្រើ", emoji: "✔️" },
+    { status: "preparing", label: "👨‍🍳 រៀបចំ" },
+    { status: "ready", label: "🍽️ រួចរាល់" },
+    { status: "served", label: "✔️ បម្រើ" },
   ];
 
   // Show only allowed next statuses

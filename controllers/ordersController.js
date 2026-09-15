@@ -1,7 +1,9 @@
 // backend/controllers/ordersController.js
 const db = require("../config/db");
 const { sendOrderNotification } = require("../services/telegramBot");
-const { broadcast } = require("../services/sse");
+const crypto = require("crypto");
+const { broadcast, addOrderClient, emitOrder } = require("../services/sse");
+const webpushSvc = require("../services/webpush");
 const { logActivity } = require("../helpers/audit");
 
 // POST /api/orders - Place order (guest)
@@ -32,51 +34,107 @@ exports.create = async (req, res) => {
       return res.status(404).json({ error: "Restaurant not found" });
     const restaurant = restaurants[0];
 
-    const [orderResult] = await db.query(
-      "INSERT INTO orders (restaurant_id, table_no, note, items, total, status, customer_name) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-      [
-        restId,
-        table_no.trim(),
-        note || null,
-        JSON.stringify(items),
-        total,
-        customer_name || null,
-      ],
-    );
+    // A one-time token lets THIS guest follow their order on /track.
+    // Self-healing: if migration v16 hasn't been applied yet (no
+    // track_token column), fall back to the legacy insert so ordering
+    // NEVER breaks — the order is just placed without a tracking link.
+    let trackToken = crypto.randomBytes(16).toString("hex");
+    let orderResult;
+    try {
+      [orderResult] = await db.query(
+        "INSERT INTO orders (restaurant_id, table_no, note, items, total, status, customer_name, track_token) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
+        [
+          restId,
+          table_no.trim(),
+          note || null,
+          JSON.stringify(items),
+          total,
+          customer_name || null,
+          trackToken,
+        ],
+      );
+    } catch (insertErr) {
+      if (insertErr?.code === "ER_BAD_FIELD_ERROR") {
+        // Unknown column 'track_token' → legacy schema, no tracking link
+        trackToken = null;
+        [orderResult] = await db.query(
+          "INSERT INTO orders (restaurant_id, table_no, note, items, total, status, customer_name) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+          [
+            restId,
+            table_no.trim(),
+            note || null,
+            JSON.stringify(items),
+            total,
+            customer_name || null,
+          ],
+        );
+      } else {
+        throw insertErr;
+      }
+    }
     const orderId = orderResult.insertId;
     const isKhmer = restaurant.default_language === "km";
 
     // 🔔 Real-time SSE broadcast for new order alert
-    broadcast(restId, "new-order", {
-      orderId,
-      tableNo: table_no.trim(),
-      customerName: customer_name || null,
-      items,
-      total,
-      note: note || null,
-      createdAt: new Date(),
-    });
+    // (guarded — a broadcast failure must never fail a placed order)
+    try {
+      broadcast(restId, "new-order", {
+        orderId,
+        restaurantId: restId,
+        restaurantName: restaurant.name || null,
+        tableNo: table_no.trim(),
+        customerName: customer_name || null,
+        items,
+        total,
+        note: note || null,
+        createdAt: new Date(),
+      });
+    } catch (sseErr) {
+      console.error("SSE broadcast error:", sseErr?.message || sseErr);
+    }
+
+    // 📲 Web Push to the owner's devices (works even when the dashboard
+    // tab is closed). Fire-and-forget — never block or fail the order.
+    webpushSvc
+      .sendToRestaurantOwner(restId, {
+        title: `🔔 ${restaurant.name || "Digital Menu"} — New order`,
+        body: `Table ${table_no.trim()}${
+          customer_name ? ` · ${customer_name}` : ""
+        } · ${Number(total).toLocaleString()}៛`,
+        tag: `order-${orderId}`,
+        url: "/dashboard",
+      })
+      .catch((err) => console.error("Web push error:", err.message));
 
     // Send interactive Telegram notification with inline keyboard
+    // (guarded — if the bot is unreachable the order must still succeed)
     if (restaurant.telegram_chat_id) {
-      const sent = await sendOrderNotification(
-        restaurant.telegram_chat_id,
-        {
-          orderId,
-          restaurantName: restaurant.name,
-          tableNo: table_no.trim(),
-          customerName: customer_name || null,
-          items,
-          total,
-          note: note || null,
-          createdAt: new Date(),
-          isKhmer,
-        },
-      );
-      if (sent) {
-        await db.query("UPDATE orders SET telegram_sent = TRUE WHERE id = ?", [
-          orderId,
-        ]);
+      try {
+        const sent = await sendOrderNotification(
+          restaurant.telegram_chat_id,
+          {
+            orderId,
+            restaurantName: restaurant.name,
+            tableNo: table_no.trim(),
+            customerName: customer_name || null,
+            items,
+            total,
+            note: note || null,
+            createdAt: new Date(),
+            isKhmer,
+          },
+        );
+        if (sent) {
+          await db.query(
+            "UPDATE orders SET telegram_sent = TRUE WHERE id = ?",
+            [orderId],
+          );
+        }
+      } catch (tgErr) {
+        console.error(
+          "Telegram notify error:",
+          tgErr?.message || tgErr,
+        );
       }
     }
 
@@ -85,6 +143,7 @@ exports.create = async (req, res) => {
       .json({
         success: true,
         orderId,
+        trackToken,
         message: isKhmer
           ? "ការបញ្ជាទិញបានជោគជ័យ!"
           : "Order placed successfully!",
@@ -207,7 +266,8 @@ exports.getRestaurant = async (req, res) => {
     const [rows] = await db.query(
       `SELECT id, name, logo_url AS logoUrl, default_language AS defaultLanguage,
               telegram_chat_id AS telegramChatId, telegram_link_code AS telegramLinkCode,
-              theme_color AS themeColor
+              theme_color AS themeColor,
+              currency, exchange_rate AS exchangeRate
        FROM restaurants WHERE id = ? AND status = 'active'`,
       [req.params.id],
     );
@@ -251,16 +311,27 @@ exports.updateStatus = async (req, res) => {
 
     // 🔔 Real-time SSE broadcast for order status change
     const [orderRows] = await db.query(
-      "SELECT restaurant_id, table_no FROM orders WHERE id = ?",
+      `SELECT o.restaurant_id, o.table_no, r.name AS restaurant_name
+       FROM orders o JOIN restaurants r ON r.id = o.restaurant_id
+       WHERE o.id = ?`,
       [req.params.id],
     );
     if (orderRows.length) {
       broadcast(orderRows[0].restaurant_id, "order-status", {
         orderId: parseInt(req.params.id),
+        restaurantId: orderRows[0].restaurant_id,
+        restaurantName: orderRows[0].restaurant_name || null,
         status,
         tableNo: orderRows[0].table_no,
       });
     }
+
+    // 🛰️ Guest tracker — live update on the per-order channel
+    emitOrder(req.params.id, "status", {
+      orderId: parseInt(req.params.id),
+      status,
+      tableNo: orderRows[0]?.table_no ?? null,
+    });
 
     logActivity({
       userId: req.user.id,
@@ -273,5 +344,72 @@ exports.updateStatus = async (req, res) => {
     res.json({ success: true, id: parseInt(req.params.id), status });
   } catch (err) {
     res.status(500).json({ error: "Server error" });
+  }
+};
+
+// GET /api/orders/track?order_id=X&token=Y — PUBLIC guest order tracker (SSE)
+// The guest receives a one-time track_token when the order is placed; this
+// endpoint validates it, then streams live status updates for that single
+// order. Token matching prevents order-id enumeration by strangers.
+exports.track = async (req, res) => {
+  const orderId = parseInt(req.query.order_id || 0);
+  const token = String(req.query.token || "");
+  if (!orderId || !token)
+    return res.status(400).json({ error: "order_id and token are required" });
+
+  try {
+    const [rows] = await db.query(
+      `SELECT o.id, o.status, o.table_no, o.items, o.total, o.note, o.created_at,
+              r.name AS restaurant_name, r.theme_color, r.logo_url,
+              r.currency, r.exchange_rate AS exchangeRate
+       FROM orders o
+       JOIN restaurants r ON r.id = o.restaurant_id
+       WHERE o.id = ? AND o.track_token = ?`,
+      [orderId, token],
+    );
+    if (!rows.length) return res.status(404).json({ error: "Order not found" });
+    const order = rows[0];
+
+    // SSE headers — sent before any data so EventSource can connect
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    if (res.flushHeaders) res.flushHeaders();
+
+    // Initial snapshot (also acts as the first "status" event)
+    const snapshot = {
+      orderId: order.id,
+      status: order.status,
+      tableNo: order.table_no,
+      items: order.items,
+      total: order.total,
+      note: order.note,
+      createdAt: order.created_at,
+      restaurantName: order.restaurant_name || null,
+      themeColor: order.theme_color || null,
+      logoUrl: order.logo_url || null,
+      currency: order.currency || "KHR",
+      exchangeRate: Number(order.exchangeRate) || 4100,
+    };
+    res.write(`event: status\ndata: ${JSON.stringify(snapshot)}\n\n`);
+
+    // Live updates: ordersController.updateStatus → emitOrder()
+    addOrderClient(order.id, res);
+
+    // Heartbeat keeps idle proxies (Render/nginx) from dropping the stream
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(": ping\n\n");
+      } catch {
+        /* connection already gone */
+      }
+    }, 25000);
+    res.on("close", () => clearInterval(heartbeat));
+  } catch (err) {
+    console.error("Order track error:", err);
+    if (!res.headersSent) res.status(500).json({ error: "Server error" });
   }
 };

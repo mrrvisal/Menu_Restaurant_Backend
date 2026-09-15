@@ -344,6 +344,7 @@ async function attemptLogin(
             telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
             theme_color AS themeColor,
             sidebar_position AS sidebarPosition,
+            currency, exchange_rate AS exchangeRate,
             status
      FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
     [user.id],
@@ -624,6 +625,7 @@ exports.me = async (req, res) => {
               telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
               theme_color AS themeColor,
               sidebar_position AS sidebarPosition,
+              currency, exchange_rate AS exchangeRate,
               status
        FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
       [req.user.id],
@@ -817,6 +819,20 @@ exports.createRestaurant = async (req, res) => {
   }
 
   try {
+    // ─── Duplicate guard: one account cannot own two restaurants with the
+    // same name (case-insensitive — utf8mb4_unicode_ci compares "My Cafe"
+    // and "my cafe" as equal, matching the UNIQUE(owner_id, name) index).
+    const [dupRows] = await db.query(
+      "SELECT id FROM restaurants WHERE owner_id = ? AND name = ? LIMIT 1",
+      [req.user.id, name.trim()],
+    );
+    if (dupRows.length) {
+      return res.status(409).json({
+        error: `You already have a restaurant named "${name.trim()}"`,
+        code: "DUPLICATE_RESTAURANT",
+      });
+    }
+
     const linkCode = await generateLinkCode();
 
     const [restaurantResult] = await db.query(
@@ -841,12 +857,20 @@ exports.createRestaurant = async (req, res) => {
               telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
               theme_color AS themeColor,
               sidebar_position AS sidebarPosition,
+              currency, exchange_rate AS exchangeRate,
               status
        FROM restaurants WHERE id = ?`,
       [restaurantId],
     );
     res.status(201).json({ restaurant: row[0] });
   } catch (err) {
+    // Race safety: the UNIQUE(owner_id, name) index is the final authority.
+    if (err.code === "ER_DUP_ENTRY") {
+      return res.status(409).json({
+        error: `You already have a restaurant named "${name.trim()}"`,
+        code: "DUPLICATE_RESTAURANT",
+      });
+    }
     console.error("Create restaurant error:", err);
     res.status(500).json({ error: "Server error: " + err.message });
   }
@@ -946,6 +970,19 @@ exports.updateRestaurant = async (req, res) => {
     if (!restaurantId)
       return res.status(404).json({ error: "Restaurant not found" });
 
+    // ─── Duplicate guard: renaming must not collide with another restaurant
+    // owned by the same account (case-insensitive, matching the DB index).
+    const [dupRows] = await db.query(
+      "SELECT id FROM restaurants WHERE owner_id = ? AND name = ? AND id != ? LIMIT 1",
+      [req.user.id, name.trim(), restaurantId],
+    );
+    if (dupRows.length) {
+      return res.status(409).json({
+        error: `You already have a restaurant named "${name.trim()}"`,
+        code: "DUPLICATE_RESTAURANT",
+      });
+    }
+
     await db.query(
       "UPDATE restaurants SET name = ?, logo_url = COALESCE(?, logo_url) WHERE id = ?",
       [name.trim(), logoUrl || null, restaurantId],
@@ -1000,6 +1037,35 @@ exports.updateTheme = async (req, res) => {
     res.json({ success: true, themeColor: themeColor.trim() });
   } catch (err) {
     console.error("Update theme error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// ─── UPDATE RESTAURANT CURRENCY ────────────────────────────
+// Prices are stored in riel; this picks how money is DISPLAYED
+// (៛ KHR or $ USD) and the exchange rate used for the conversion.
+// Mirrors updateTheme/updateSidebar: owner-scoped, validated, simple.
+exports.updateCurrency = async (req, res) => {
+  const cur = String(req.body.currency || "").toUpperCase();
+  if (!["KHR", "USD"].includes(cur))
+    return res.status(400).json({ error: "Invalid currency" });
+
+  const rate = Number(req.body.exchangeRate);
+  if (!Number.isFinite(rate) || rate <= 0)
+    return res.status(400).json({ error: "Invalid exchange rate" });
+
+  try {
+    const restaurantId = await resolveOwnerRestaurant(req);
+    if (!restaurantId)
+      return res.status(404).json({ error: "Restaurant not found" });
+
+    await db.query(
+      "UPDATE restaurants SET currency = ?, exchange_rate = ? WHERE id = ?",
+      [cur, rate, restaurantId],
+    );
+    res.json({ success: true, currency: cur, exchangeRate: rate });
+  } catch (err) {
+    console.error("Update currency error:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -1185,6 +1251,7 @@ exports.googleLogin = async (req, res) => {
               telegram_link_code AS telegramLinkCode, default_language AS defaultLanguage,
               theme_color AS themeColor,
               sidebar_position AS sidebarPosition,
+              currency, exchange_rate AS exchangeRate,
               status
        FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
       [user.id],

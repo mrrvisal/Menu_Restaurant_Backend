@@ -18,6 +18,7 @@ const menusCtrl = require("../controllers/menusController");
 const ordersCtrl = require("../controllers/ordersController");
 const telegramCtrl = require("../controllers/telegramController");
 const { addClient } = require("../services/sse");
+const webpushSvc = require("../services/webpush");
 const db = require("../config/db");
 const { logActivity } = require("../helpers/audit");
 
@@ -77,6 +78,7 @@ router.patch("/auth/restaurant", auth, upload.single("logo"), authCtrl.updateRes
 router.post("/auth/restaurants", auth, upload.single("logo"), authCtrl.createRestaurant);
 router.patch("/auth/theme", auth, authCtrl.updateTheme);
 router.patch("/auth/sidebar", auth, authCtrl.updateSidebar);
+router.patch("/auth/currency", auth, authCtrl.updateCurrency);
 
 // ─── MENUS (public read per restaurant, owner/super_admin write) ─
 router.get("/menus", softAuth, menusCtrl.getAll);
@@ -195,6 +197,8 @@ router.get("/orders/stream", (req, res, next) => {
 });
 router.get("/orders", auth, requireOwnerOrAdmin, ordersCtrl.getAll);
 router.get("/orders/stats", auth, requireOwnerOrAdmin, ordersCtrl.stats);
+// Guest order tracking — public SSE for one order (token-protected)
+router.get("/orders/track", ordersCtrl.track);
 router.patch(
   "/orders/:id/status",
   auth,
@@ -1039,6 +1043,87 @@ router.get("/restaurants/share-link/:id", softAuth, (req, res) => {
     res.json({ shareLink, token: encryptedToken });
   } catch (error) {
     res.status(500).json({ error: "Failed to generate share link" });
+  }
+});
+
+// ─── WEB PUSH (VAPID) ──────────────────────────────────────
+// Browser push subscriptions for "New order" alerts that reach the
+// owner's device even when the dashboard tab is closed.
+
+// GET /api/push/public-key — the VAPID public key the browser needs to subscribe.
+router.get("/push/public-key", auth, (req, res) => {
+  res.json({ key: process.env.VAPID_PUBLIC_KEY || null });
+});
+
+// POST /api/push/subscribe — save/refresh a PushSubscription for this user.
+router.post("/push/subscribe", auth, async (req, res) => {
+  try {
+    const sub = req.body?.subscription;
+    const keys = sub?.keys || {};
+    if (!sub?.endpoint || !keys.p256dh || !keys.auth) {
+      return res.status(400).json({ error: "Invalid subscription" });
+    }
+    const endpoint = String(sub.endpoint).slice(0, 768);
+    await db.query(
+      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE user_id = VALUES(user_id),
+         p256dh = VALUES(p256dh), auth = VALUES(auth),
+         user_agent = VALUES(user_agent)`,
+      [
+        req.user.id,
+        endpoint,
+        String(keys.p256dh),
+        String(keys.auth),
+        (req.headers["user-agent"] || "").slice(0, 255) || null,
+      ],
+    );
+    logActivity({
+      userId: req.user.id,
+      action: "push_subscribe",
+      description: "Push notifications enabled on a device",
+      ipAddress: req.ip,
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Push subscribe error:", err.message);
+    res.status(500).json({ error: "Failed to save subscription" });
+  }
+});
+
+// POST /api/push/unsubscribe — remove a subscription (endpoint in body).
+router.post("/push/unsubscribe", auth, async (req, res) => {
+  try {
+    const endpoint = req.body?.endpoint;
+    if (!endpoint)
+      return res.status(400).json({ error: "Missing endpoint" });
+    await db.query("DELETE FROM push_subscriptions WHERE endpoint = ?", [
+      String(endpoint).slice(0, 768),
+    ]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Push unsubscribe error:", err.message);
+    res.status(500).json({ error: "Failed to remove subscription" });
+  }
+});
+
+// POST /api/push/test — send a test push to every device of this user.
+router.post("/push/test", auth, async (req, res) => {
+  try {
+    if (!webpushSvc.isConfigured())
+      return res
+        .status(501)
+        .json({ error: "Push not configured on the server" });
+    await webpushSvc.sendToUser(req.user.id, {
+      title: "🔔 Digital Menu",
+      body: "Test push — notifications are working on this device!",
+      tag: "push-test",
+      url: "/dashboard",
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Push test error:", err.message);
+    res.status(500).json({ error: "Failed to send test push" });
   }
 });
 
