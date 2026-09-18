@@ -197,6 +197,8 @@ router.get("/orders/stream", (req, res, next) => {
 });
 router.get("/orders", auth, requireOwnerOrAdmin, ordersCtrl.getAll);
 router.get("/orders/stats", auth, requireOwnerOrAdmin, ordersCtrl.stats);
+// Sales report export (CSV) — same filters as /orders/stats
+router.get("/orders/export", auth, requireOwnerOrAdmin, ordersCtrl.exportCsv);
 // Guest order tracking — public SSE for one order (token-protected)
 router.get("/orders/track", ordersCtrl.track);
 router.patch(
@@ -205,6 +207,326 @@ router.patch(
   requireOwnerOrAdmin,
   ordersCtrl.updateStatus,
 );
+
+// ─── ADMIN MANAGEMENT ROUTES (Super Admin only) ──────────
+
+// GET /api/admin/admins - List all admins with pagination
+router.get("/admin/admins", auth, requireSuperAdmin, async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const offset = (page - 1) * limit;
+    const search = (req.query.search || "").trim();
+    const roleFilter = req.query.role || "";
+    const statusFilter = req.query.status || "";
+
+    let whereClause = "";
+    const params = [];
+
+    if (search) {
+      whereClause = `(u.email LIKE ? OR u.full_name LIKE ?)`;
+      const likeSearch = `%${search}%`;
+      params.push(likeSearch, likeSearch);
+    }
+
+    if (roleFilter && ["owner", "super_admin"].includes(roleFilter)) {
+      whereClause = whereClause ? `${whereClause} AND u.role = ?` : "u.role = ?";
+      params.push(roleFilter);
+    }
+
+    if (statusFilter && ["active", "suspended", "inactive"].includes(statusFilter)) {
+      whereClause = whereClause ? `${whereClause} AND u.status = ?` : "u.status = ?";
+      params.push(statusFilter);
+    }
+
+    const whereSql = whereClause ? `WHERE ${whereClause}` : "";
+
+    const [countRows] = await db.query(
+      `SELECT COUNT(*) as total FROM users u ${whereSql}`,
+      params
+    );
+    const total = countRows[0].total;
+
+    const [rows] = await db.query(
+      `SELECT u.id, u.email, u.full_name, u.role, u.status,
+              u.email_verified_at, u.last_login_at, u.created_at,
+              (SELECT COUNT(*) FROM restaurants WHERE owner_id = u.id) as restaurant_count,
+              (SELECT r.name FROM restaurants r WHERE r.owner_id = u.id LIMIT 1) as restaurant_name
+       FROM users u
+       ${whereSql}
+       ORDER BY u.created_at DESC
+       LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
+
+    res.json({
+      success: true,
+      admins: rows.map((r) => ({
+        id: r.id,
+        email: r.email,
+        fullName: r.full_name,
+        role: r.role,
+        status: r.status,
+        emailVerified: !!r.email_verified_at,
+        lastLoginAt: r.last_login_at,
+        createdAt: r.created_at,
+        restaurantCount: r.restaurant_count || 0,
+        restaurantName: r.restaurant_name,
+      })),
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
+  } catch (err) {
+    console.error("Get admins error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// GET /api/admin/admins/stats - Get admin statistics
+router.get("/admin/admins/stats", auth, requireSuperAdmin, async (req, res) => {
+  try {
+    const [roleCounts] = await db.query(
+      `SELECT role, COUNT(*) as count, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active_count
+       FROM users
+       WHERE role IN ('owner', 'super_admin')
+       GROUP BY role`
+    );
+
+    const [restaurantCount] = await db.query("SELECT COUNT(*) as total FROM restaurants");
+
+    const [orderStats] = await db.query(
+      `SELECT COUNT(*) as total_orders,
+              SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_orders,
+              COALESCE(SUM(CASE WHEN status = 'completed' THEN total ELSE 0 END), 0) as total_revenue
+       FROM orders`
+    );
+
+    const [recentAdmins] = await db.query(
+      `SELECT id, email, full_name, role, status, created_at
+       FROM users
+       WHERE role IN ('owner', 'super_admin')
+         AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+       ORDER BY created_at DESC
+       LIMIT 10`
+    );
+
+    const [activeSessions] = await db.query(
+      "SELECT COUNT(*) as count FROM device_sessions WHERE revoked = 0 AND last_active_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)"
+    );
+
+    const stats = {
+      byRole: { owner: { total: 0, active: 0 }, super_admin: { total: 0, active: 0 } },
+      totalRestaurants: restaurantCount[0].total || 0,
+      totalOrders: orderStats[0].total_orders || 0,
+      completedOrders: orderStats[0].completed_orders || 0,
+      totalRevenue: orderStats[0].total_revenue || 0,
+      activeSessions: activeSessions[0].count || 0,
+      recentAdmins: recentAdmins.map((a) => ({
+        id: a.id,
+        email: a.email,
+        fullName: a.full_name,
+        role: a.role,
+        status: a.status,
+        createdAt: a.created_at,
+      })),
+    };
+
+    roleCounts.forEach((r) => {
+      stats.byRole[r.role] = { total: r.count, active: r.active_count || 0 };
+    });
+
+    res.json({ success: true, stats });
+  } catch (err) {
+    console.error("Get admin stats error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// POST /api/admin/admins - Create a new admin
+router.post("/admin/admins", auth, requireSuperAdmin, async (req, res) => {
+  try {
+    const { email, password, fullName, role } = req.body;
+
+    if (!email || !email.includes("@")) {
+      return res.status(400).json({ error: "Valid email is required" });
+    }
+
+    if (!role || !["owner", "super_admin"].includes(role)) {
+      return res.status(400).json({ error: "Role must be 'owner' or 'super_admin'" });
+    }
+
+    if (role === "super_admin" && (!password || password.length < 8)) {
+      return res.status(400).json({
+        error: "Password must be at least 8 characters for super admin",
+      });
+    }
+
+    const [existing] = await db.query("SELECT id FROM users WHERE email = ?", [
+      email.trim().toLowerCase(),
+    ]);
+    if (existing.length) {
+      return res.status(409).json({ error: "Email already exists", code: "EMAIL_EXISTS" });
+    }
+
+    const bcrypt = require("bcryptjs");
+    const crypto = require("crypto");
+    const hashedPassword = password ? await bcrypt.hash(password, 10) : "";
+    const verifyToken = crypto.randomBytes(32).toString("hex");
+
+    const [result] = await db.query(
+      `INSERT INTO users (email, password, full_name, role, status, email_verify_token, email_verified_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        email.trim().toLowerCase(),
+        hashedPassword,
+        fullName?.trim() || "",
+        role,
+        role === "super_admin" ? "active" : "inactive",
+        verifyToken,
+        role === "super_admin" ? new Date() : null,
+      ]
+    );
+
+    const adminId = result.insertId;
+
+    if (role === "owner") {
+      await db.query(
+        `INSERT INTO restaurants (owner_id, name, status) VALUES (?, ?, 'active')`,
+        [adminId, `${fullName || email.split("@")[0]}'s Restaurant`]
+      );
+    }
+
+    const { logActivity } = require("../helpers/audit");
+    logActivity({
+      userId: req.user.id,
+      action: "create_admin",
+      description: `Created ${role} admin: ${email}`,
+      ipAddress: req.ip,
+    });
+
+    res.status(201).json({
+      success: true,
+      admin: {
+        id: adminId,
+        email: email.trim().toLowerCase(),
+        fullName: fullName?.trim() || "",
+        role,
+        status: role === "super_admin" ? "active" : "inactive",
+        emailVerified: role === "super_admin",
+      },
+    });
+  } catch (err) {
+    console.error("Create admin error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// PATCH /api/admin/admins/:id - Update admin
+router.patch("/admin/admins/:id", auth, requireSuperAdmin, async (req, res) => {
+  try {
+    const adminId = parseInt(req.params.id);
+    if (isNaN(adminId)) {
+      return res.status(400).json({ error: "Invalid admin ID" });
+    }
+
+    if (adminId === req.user.id) {
+      return res.status(403).json({ error: "Cannot modify your own account this way" });
+    }
+
+    const { fullName, status } = req.body;
+    const updates = [];
+    const params = [];
+
+    if (fullName !== undefined) {
+      updates.push("full_name = ?");
+      params.push(fullName.trim());
+    }
+
+    if (status !== undefined) {
+      if (!["active", "suspended", "inactive"].includes(status)) {
+        return res.status(400).json({ error: "Invalid status" });
+      }
+      updates.push("status = ?");
+      params.push(status);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: "No fields to update" });
+    }
+
+    updates.push("updated_at = NOW()");
+    params.push(adminId);
+
+    await db.query(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`, params);
+
+    const { logActivity } = require("../helpers/audit");
+    logActivity({
+      userId: req.user.id,
+      action: "update_admin",
+      description: `Updated admin ${adminId}`,
+      ipAddress: req.ip,
+    });
+
+    const [rows] = await db.query(
+      "SELECT id, email, full_name, role, status, email_verified_at, updated_at FROM users WHERE id = ?",
+      [adminId]
+    );
+
+    res.json({
+      success: true,
+      admin: {
+        id: rows[0].id,
+        email: rows[0].email,
+        fullName: rows[0].full_name,
+        role: rows[0].role,
+        status: rows[0].status,
+        emailVerified: !!rows[0].email_verified_at,
+        updatedAt: rows[0].updated_at,
+      },
+    });
+  } catch (err) {
+    console.error("Update admin error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// DELETE /api/admin/admins/:id - Delete admin
+router.delete("/admin/admins/:id", auth, requireSuperAdmin, async (req, res) => {
+  try {
+    const adminId = parseInt(req.params.id);
+    if (isNaN(adminId)) {
+      return res.status(400).json({ error: "Invalid admin ID" });
+    }
+
+    if (adminId === req.user.id) {
+      return res.status(403).json({ error: "Cannot delete your own account" });
+    }
+
+    const [rows] = await db.query("SELECT id, email, role FROM users WHERE id = ?", [
+      adminId,
+    ]);
+    if (!rows.length) {
+      return res.status(404).json({ error: "Admin not found" });
+    }
+
+    const adminEmail = rows[0].email;
+    const adminRole = rows[0].role;
+
+    await db.query("DELETE FROM users WHERE id = ?", [adminId]);
+
+    const { logActivity } = require("../helpers/audit");
+    logActivity({
+      userId: req.user.id,
+      action: "delete_admin",
+      description: `Deleted ${adminRole} admin: ${adminEmail}`,
+      ipAddress: req.ip,
+    });
+
+    res.json({ success: true, message: "Admin deleted successfully" });
+  } catch (err) {
+    console.error("Delete admin error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
 // ─── SUPER ADMIN ROUTES ────────────────────────────────────
 router.get("/admin/users", auth, requireSuperAdmin, async (req, res) => {

@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const { broadcast, addOrderClient, emitOrder } = require("../services/sse");
 const webpushSvc = require("../services/webpush");
 const { logActivity } = require("../helpers/audit");
+const salesReport = require("../helpers/salesReport");
 
 // POST /api/orders - Place order (guest)
 exports.create = async (req, res) => {
@@ -188,77 +189,358 @@ exports.getAll = async (req, res) => {
   }
 };
 
-// GET /api/orders/stats - Get revenue and order analytics for owner's restaurant
+// ══════════════════════════════════════════════════════════════
+//  SALES REPORTS  (dashboard metrics + Reports tab + CSV export)
+//  ───────────────────────────────────────────────────────────
+//  One shared builder feeds GET /orders/stats (JSON) and
+//  GET /orders/export (CSV) so the screen and the downloaded file can
+//  never disagree on the numbers.
+// ═════════════════════════════════════════════════════════════
+
+// Resolve which restaurant a report belongs to: the requested one when the
+// caller owns it, otherwise the account's FIRST restaurant (multi-restaurant
+// owners). Replies 404 itself and returns null when nothing matches.
+async function resolveReportRestaurant(req, res) {
+  const requested = parseInt(req.query.restaurant_id || 0);
+  if (!requested) {
+    const [first] = await db.query(
+      "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
+      [req.user.id],
+    );
+    if (!first.length) {
+      res.status(404).json({ error: "Restaurant not found" });
+      return null;
+    }
+    return first[0].id;
+  }
+
+  const [owned] = await db.query(
+    "SELECT id FROM restaurants WHERE id = ? AND owner_id = ?",
+    [requested, req.user.id],
+  );
+  if (!owned.length) {
+    res.status(404).json({ error: "Restaurant not found or not owned by you" });
+    return null;
+  }
+  return requested;
+}
+
+// Optional inclusive start_date / end_date filter (YYYY-MM-DD).
+function buildOrderFilter(req, restaurantId) {
+  const filters = [restaurantId];
+  let whereClause = "restaurant_id = ?";
+  if (req.query.start_date) {
+    whereClause += " AND created_at >= ?";
+    filters.push(`${req.query.start_date} 00:00:00`);
+  }
+  if (req.query.end_date) {
+    whereClause += " AND created_at <= ?";
+    filters.push(`${req.query.end_date} 23:59:59`);
+  }
+  return { whereClause, filters };
+}
+
+const REPORT_GROUPS = ["day", "week", "month"];
+const REPORT_TYPES = [
+  "summary",
+  "orders",
+  "series",
+  "items",
+  "tables",
+  "hours",
+  "status",
+];
+// Status order used by the breakdown table / CSV (matches the dashboard UI).
+const STATUS_ORDER = [
+  "pending",
+  "confirmed",
+  "preparing",
+  "ready",
+  "served",
+  "cancelled",
+];
+// SQL expression that buckets an order into the active period. The JS bucket
+// keys from helpers/salesReport.buildBuckets mirror these exactly, so the
+// zero-filled axis always lines up with the grouped rows.
+const GROUP_EXPR = {
+  day: "DATE_FORMAT(created_at, '%Y-%m-%d')",
+  week: "YEARWEEK(created_at, 3)", // ISO-8601 year-week (e.g. 202638)
+  month: "DATE_FORMAT(created_at, '%Y-%m')",
+};
+
+function toNum(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Everything the Reports tab and the CSV export need for one restaurant and
+// one date range.
+async function buildReportData(req, restaurantId) {
+  const group = REPORT_GROUPS.includes(String(req.query.group))
+    ? String(req.query.group)
+    : "day";
+  const topLimit = Math.min(Math.max(parseInt(req.query.top_limit) || 10, 1), 50);
+
+  const { whereClause, filters } = buildOrderFilter(req, restaurantId);
+  // A sale is anything that was not cancelled — cancelled orders stay visible
+  // in the status breakdown / cancelled totals, but never inflate revenue,
+  // "top dishes", or the per-hour / per-table numbers.
+  const salesWhere = `${whereClause} AND status <> 'cancelled'`;
+
+  // Headline numbers in a single pass. The legacy all-status fields keep
+  // their original meaning for existing callers; the net* fields exclude
+  // cancelled orders.
+  const [[summary]] = await db.query(
+    `SELECT
+       COALESCE(SUM(total), 0) AS totalRevenue,
+       COUNT(*) AS totalOrders,
+       COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN total ELSE 0 END), 0) AS netRevenue,
+       COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN 1 ELSE 0 END), 0) AS netOrders,
+       COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelledOrders,
+       COALESCE(SUM(CASE WHEN status = 'cancelled' THEN total ELSE 0 END), 0) AS cancelledRevenue
+     FROM orders
+     WHERE ${whereClause}`,
+    filters,
+  );
+
+  // Legacy per-day series (all statuses, newest first) — same shape as before
+  // so the dashboard metrics keep working untouched.
+  const [daily] = await db.query(
+    `SELECT
+       DATE(created_at) AS day,
+       COUNT(*) AS orders,
+       COALESCE(SUM(total), 0) AS revenue
+     FROM orders
+     WHERE ${whereClause}
+     GROUP BY DATE(created_at)
+     ORDER BY DATE(created_at) DESC`,
+    filters,
+  );
+
+  // Chart / report series: NET sales grouped by day | week | month, then
+  // zero-filled so quiet days still appear on the axis.
+  const [seriesRows] = await db.query(
+    `SELECT
+       ${GROUP_EXPR[group]} AS bucket,
+       COUNT(*) AS orders,
+       COALESCE(SUM(total), 0) AS revenue
+     FROM orders
+     WHERE ${salesWhere}
+     GROUP BY bucket
+     ORDER BY bucket ASC`,
+    filters,
+  );
+  const buckets = salesReport.buildBuckets(
+    group,
+    req.query.start_date,
+    req.query.end_date,
+  );
+  const series = buckets.length
+    ? salesReport.zeroFillSeries(seriesRows, buckets)
+    : seriesRows.map((row) => ({
+        key: String(row.bucket),
+        label: String(row.bucket),
+        orders: toNum(row.orders),
+        revenue: toNum(row.revenue),
+      }));
+  // Status breakdown (all statuses — cancelled work stays visible)
+  const [statusRows] = await db.query(
+    `SELECT status, COUNT(*) AS orders, COALESCE(SUM(total), 0) AS revenue
+     FROM orders
+     WHERE ${whereClause}
+     GROUP BY status`,
+    filters,
+  );
+  const byStatus = statusRows
+    .map((row) => ({
+      status: row.status,
+      orders: toNum(row.orders),
+      revenue: toNum(row.revenue),
+    }))
+    .sort(
+      (a, b) => STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status),
+    );
+
+  // Which tables order most (net sales)
+  const [tableRows] = await db.query(
+    `SELECT table_no, COUNT(*) AS orders, COALESCE(SUM(total), 0) AS revenue
+     FROM orders
+     WHERE ${salesWhere}
+     GROUP BY table_no
+     ORDER BY revenue DESC, orders DESC
+     LIMIT 200`,
+    filters,
+  );
+
+  // Busiest hours (net sales) — the dashboard plots these on an hour axis
+  const [hourRows] = await db.query(
+    `SELECT HOUR(created_at) AS hour, COUNT(*) AS orders, COALESCE(SUM(total), 0) AS revenue
+     FROM orders
+     WHERE ${salesWhere}
+     GROUP BY hour
+     ORDER BY hour ASC`,
+    filters,
+  );
+
+  // Top-selling dishes. The line items live in a JSON column, so they are
+  // aggregated in JS instead of JSON_TABLE — portable across MySQL, MariaDB
+  // and TiDB, and only the `items` column is pulled over the wire.
+  const [itemRows] = await db.query(
+    `SELECT items FROM orders WHERE ${salesWhere}`,
+    filters,
+  );
+  const { itemsSold, top } = salesReport.aggregateTopItems(itemRows, topLimit);
+
+  const netOrders = toNum(summary.netOrders);
+  const netRevenue = toNum(summary.netRevenue);
+  const bestPeriod = series.reduce(
+    (acc, row) => (acc && acc.revenue >= row.revenue ? acc : row),
+    null,
+  );
+
+  return {
+    // ── legacy fields (unchanged meaning) ──
+    totalRevenue: summary.totalRevenue,
+    totalOrders: summary.totalOrders,
+    daily: daily.map((row) => ({
+      day: row.day,
+      orders: row.orders,
+      revenue: row.revenue,
+    })),
+    // ── report fields ──
+    group,
+    range: {
+      startDate: req.query.start_date || null,
+      endDate: req.query.end_date || null,
+    },
+    summary: {
+      revenue: netRevenue,
+      orders: netOrders,
+      itemsSold,
+      avgOrderValue: netOrders
+        ? Math.round((netRevenue / netOrders) * 100) / 100
+        : 0,
+      cancelledOrders: toNum(summary.cancelledOrders),
+      cancelledRevenue: toNum(summary.cancelledRevenue),
+      bestPeriod: bestPeriod && bestPeriod.orders ? bestPeriod : null,
+    },
+    series,
+    topItems: top,
+    byTable: tableRows.map((row) => ({
+      table_no: row.table_no,
+      orders: toNum(row.orders),
+      revenue: toNum(row.revenue),
+    })),
+    byHour: hourRows.map((row) => ({
+      hour: toNum(row.hour),
+      orders: toNum(row.orders),
+      revenue: toNum(row.revenue),
+    })),
+    byStatus,
+  };
+}
+
+// GET /api/orders/stats - revenue and order analytics for owner's restaurant
 exports.stats = async (req, res) => {
   try {
-    const requested = parseInt(req.query.restaurant_id || 0);
-    let restaurantId = requested;
-    if (!restaurantId) {
-      const [first] = await db.query(
-        "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
-        [req.user.id],
-      );
-      if (!first.length)
-        return res.status(404).json({ error: "Restaurant not found" });
-      restaurantId = first[0].id;
-    } else {
-      const [owned] = await db.query(
-        "SELECT id FROM restaurants WHERE id = ? AND owner_id = ?",
-        [restaurantId, req.user.id],
-      );
-      if (!owned.length)
-        return res
-          .status(404)
-          .json({ error: "Restaurant not found or not owned by you" });
-    }
-
-    const filters = [restaurantId];
-    let whereClause = "restaurant_id = ?";
-
-    if (req.query.start_date) {
-      whereClause += " AND created_at >= ?";
-      filters.push(`${req.query.start_date} 00:00:00`);
-    }
-    if (req.query.end_date) {
-      whereClause += " AND created_at <= ?";
-      filters.push(`${req.query.end_date} 23:59:59`);
-    }
-
-    const [[summary]] = await db.query(
-      `SELECT
-         COALESCE(SUM(total), 0) AS totalRevenue,
-         COUNT(*) AS totalOrders
-       FROM orders
-       WHERE ${whereClause}`,
-      filters,
-    );
-
-    const [daily] = await db.query(
-      `SELECT
-         DATE(created_at) AS day,
-         COUNT(*) AS orders,
-         COALESCE(SUM(total), 0) AS revenue
-       FROM orders
-       WHERE ${whereClause}
-       GROUP BY DATE(created_at)
-       ORDER BY DATE(created_at) DESC`,
-      filters,
-    );
-
-    res.json({
-      totalRevenue: summary.totalRevenue,
-      totalOrders: summary.totalOrders,
-      daily: daily.map((row) => ({
-        day: row.day,
-        orders: row.orders,
-        revenue: row.revenue,
-      })),
-    });
+    const restaurantId = await resolveReportRestaurant(req, res);
+    if (!restaurantId) return; // 404 already sent
+    res.json(await buildReportData(req, restaurantId));
   } catch (err) {
     console.error("Order stats error:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
+
+// GET /api/orders/export - download the sales report as CSV
+// ?type=summary|orders|series|items|tables|hours|status  &lang=km|en
+exports.exportCsv = async (req, res) => {
+  try {
+    const restaurantId = await resolveReportRestaurant(req, res);
+    if (!restaurantId) return; // 404 already sent
+
+    const lang = req.query.lang === "km" ? "km" : "en";
+    const requested = String(req.query.type || "series").toLowerCase();
+    const dataset = REPORT_TYPES.includes(requested) ? requested : "series";
+    const data = await buildReportData(req, restaurantId);
+    const L = salesReport.CSV_LABELS[lang];
+
+    let rows;
+    switch (dataset) {
+      case "orders": {
+        // Every order in the range, oldest first (kitchen / receipt order)
+        const { whereClause, filters } = buildOrderFilter(req, restaurantId);
+        const [orderRows] = await db.query(
+          `SELECT id, table_no, status, customer_name, note, items, total,
+                  DATE_FORMAT(created_at, '%Y-%m-%d %H:%i') AS created_at_text
+           FROM orders
+           WHERE ${whereClause}
+           ORDER BY created_at ASC`,
+          filters,
+        );
+        rows = orderRows.map((o) => ({
+          id: o.id,
+          date: o.created_at_text,
+          table_no: o.table_no,
+          status: salesReport.statusLabel(o.status, lang),
+          customer_name: o.customer_name || "",
+          note: o.note || "",
+          items: salesReport.itemsSummary(o.items),
+          total: toNum(o.total),
+        }));
+        break;
+      }
+      case "items":
+        rows = data.topItems.map((item, i) => ({ rank: i + 1, ...item }));
+        break;
+      case "tables":
+        rows = data.byTable;
+        break;
+      case "hours":
+        rows = data.byHour;
+        break;
+      case "status":
+        rows = data.byStatus.map((row) => ({
+          ...row,
+          status: salesReport.statusLabel(row.status, lang),
+        }));
+        break;
+      case "summary": {
+        const s = data.summary;
+        rows = [
+          { metric: L.net_revenue, value: s.revenue },
+          { metric: L.net_orders, value: s.orders },
+          { metric: L.items_sold, value: s.itemsSold },
+          { metric: L.avg_order_value, value: s.avgOrderValue },
+          { metric: L.cancelled_orders, value: s.cancelledOrders },
+          { metric: L.cancelled_revenue, value: s.cancelledRevenue },
+          { metric: L.range_start, value: data.range.startDate || "" },
+          { metric: L.range_end, value: data.range.endDate || "" },
+        ];
+        break;
+      }
+      default:
+        rows = data.series;
+    }
+
+    const csv = salesReport.buildCsv(
+      salesReport.csvColumns(dataset, lang),
+      rows,
+    );
+    const filename = salesReport.csvFilename(
+      dataset,
+      data.range.startDate,
+      data.range.endDate,
+    );
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(csv);
+  } catch (err) {
+    console.error("Sales export error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
 
 // GET /api/restaurants/:id - Public restaurant detail
 exports.getRestaurant = async (req, res) => {

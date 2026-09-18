@@ -8,7 +8,13 @@ const app = express();
 const PORT = process.env.PORT || 5001;
 
 // Middleware
-app.use(cors());
+// `exposedHeaders` lets the dashboard read the filename of a CSV download
+// (Content-Disposition is not readable by browser JS unless it is exposed).
+app.use(
+  cors({
+    exposedHeaders: ["Content-Disposition"],
+  }),
+);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
