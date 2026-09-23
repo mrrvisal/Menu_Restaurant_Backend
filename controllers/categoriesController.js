@@ -2,8 +2,16 @@
 const db = require("../config/db");
 
 // Helper: get restaurant_id for public requests
+// Resolve which restaurant a request targets (see foodsController — never
+// fall back to a hard-coded restaurant: that leaked another account's data).
+//   • explicit ?restaurant_id → it (public menu: guests / QR links pass this)
+//   • logged-in user          → their FIRST restaurant
+//   • otherwise               → null (the handler answers 400)
 async function getRestaurantId(req) {
-  if (req.query.restaurant_id) return parseInt(req.query.restaurant_id);
+  if (req.query.restaurant_id) {
+    const id = parseInt(req.query.restaurant_id, 10);
+    return Number.isFinite(id) && id > 0 ? id : null;
+  }
   if (req.user) {
     const [rows] = await db.query(
       "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
@@ -11,13 +19,17 @@ async function getRestaurantId(req) {
     );
     if (rows.length) return rows[0].id;
   }
-  return 1; // Default
+  return null;
 }
 
 // GET /api/categories?restaurant_id=X&menu_id=Y
 exports.getAll = async (req, res) => {
   try {
     const restaurantId = await getRestaurantId(req);
+    if (!restaurantId)
+      return res
+        .status(400)
+        .json({ error: "No restaurant found — specify ?restaurant_id" });
     const { menu_id } = req.query;
 
     let sql =

@@ -205,11 +205,21 @@ exports.register = async (req, res) => {
   try {
     // Check email uniqueness
     const [emailCheck] = await db.query(
-      "SELECT id FROM users WHERE email = ?",
+      "SELECT id, password, google_id FROM users WHERE email = ?",
       [email.trim()],
     );
-    if (emailCheck.length)
+    if (emailCheck.length) {
+      const existing = emailCheck[0];
+      // A Google-created account has no password yet — point the owner at the
+      // two ways in instead of a dead-end "Email already registered".
+      if (!existing.password && existing.google_id)
+        return res.status(409).json({
+          error:
+            "This email already has an account created with Google. Use “Continue with Google” to sign in, or “Forgot password” to set a password.",
+          code: "email_exists_google",
+        });
       return res.status(409).json({ error: "Email already registered" });
+    }
 
     // Generate email verify token
     const verifyToken = crypto.randomBytes(32).toString("hex");
@@ -300,6 +310,19 @@ async function attemptLogin(
   if (!rows.length) return { status: 401, error: "Invalid credentials" };
 
   const user = rows[0];
+
+  // Google-only accounts have no password yet (see googleLogin): bcrypt.compare
+  // would throw on a NULL hash, so fail fast with a message that tells the user
+  // how to get in instead of a misleading "Invalid credentials".
+  if (!user.password) {
+    return {
+      status: 401,
+      error:
+        "This account was created with Google. Use the “Continue with Google” button, or set a password via “Forgot password”.",
+      code: "use_google_signin",
+    };
+  }
+
   const match = await bcrypt.compare(password, user.password);
   if (!match) return { status: 401, error: "Invalid credentials" };
 
@@ -369,6 +392,8 @@ async function attemptLogin(
         email: user.email,
         role: user.role,
         emailVerified: !!user.email_verified_at,
+        // false for Google-created accounts until they set a password
+        hasPassword: !!user.password,
       },
       restaurants,
     },
@@ -500,7 +525,8 @@ exports.resendVerification = async (req, res) => {
 
 // ─── FORGOT PASSWORD ───────────────────────────────────────
 exports.forgotPassword = async (req, res) => {
-  const { email } = req.body;
+  const email =
+    typeof req.body.email === "string" ? req.body.email.trim() : "";
   if (!email) return res.status(400).json({ error: "Email is required" });
 
   try {
@@ -514,11 +540,17 @@ exports.forgotPassword = async (req, res) => {
         .json({ error: "No account found with this email" });
 
     const token = crypto.randomBytes(32).toString("hex");
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
+    // Expiry is computed with the DATABASE clock (NOW() + 1 hour), not with a
+    // JS Date: mysql2 serialises Date parameters in the Node process timezone,
+    // which drifts from the DB session timezone — a JS `expires_at` was stored
+    // wrong (e.g. now + 8h on a UTC+7 machine) while resetPassword compares it
+    // against the DB's NOW(). Keeping both sides on the DB clock makes the
+    // 1-hour window exact on every machine.
     await db.query(
-      "INSERT INTO password_resets (user_id, token, expires_at) VALUES (?, ?, ?)",
-      [rows[0].id, token, expiresAt],
+      `INSERT INTO password_resets (user_id, token, expires_at)
+       VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 HOUR))`,
+      [rows[0].id, token],
     );
 
     // Send password reset email (non-blocking - don't await)
@@ -611,7 +643,7 @@ exports.resetPassword = async (req, res) => {
 exports.me = async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT u.id, u.email, u.role, u.email_verified_at, u.status, u.created_at
+      `SELECT u.id, u.email, u.role, u.email_verified_at, u.status, u.created_at, u.password
        FROM users u WHERE u.id = ?`,
       [req.user.id],
     );
@@ -639,6 +671,7 @@ exports.me = async (req, res) => {
         emailVerified: !!user.email_verified_at,
         status: user.status,
         createdAt: user.created_at,
+        hasPassword: !!user.password,
       },
       restaurants,
     });
@@ -754,7 +787,7 @@ exports.updateAccount = async (req, res) => {
 
     // ── Refresh session with a token that carries the current email ──
     const [freshRows] = await db.query(
-      "SELECT id, email, role, email_verified_at, status, created_at FROM users WHERE id = ?",
+      "SELECT id, email, role, email_verified_at, status, created_at, password FROM users WHERE id = ?",
       [req.user.id],
     );
     const fresh = freshRows[0];
@@ -778,6 +811,7 @@ exports.updateAccount = async (req, res) => {
         emailVerified: !!fresh.email_verified_at,
         status: fresh.status,
         createdAt: fresh.created_at,
+        hasPassword: !!fresh.password,
       },
       message:
         wantsEmail && wantsPassword
@@ -1180,18 +1214,18 @@ exports.googleLogin = async (req, res) => {
 
     // … else create a brand-new owner account (email already verified by Google)
     if (!user) {
-      // The password column is NOT NULL — store an unusable random hash so
-      // this account can only be signed into via Google.
-      const unusablePassword = await bcrypt.hash(
-        crypto.randomBytes(32).toString("hex"),
-        10,
-      );
+      // Store NO password (NULL). A Google-created account has no usable
+      // password until its owner sets one — via the dashboard Account panel or
+      // the "Forgot password" email flow. NULL (rather than a random unusable
+      // hash) is what tells updateAccount() that the session itself is the
+      // proof, so a Google-only owner is not asked for a "current password"
+      // that never existed. Email+password login stays unusable until then.
       // Build the INSERT from the columns that actually exist in this
       // database (older schemas may lack full_name). email_verified_at is
       // always set to NOW() server-side, so it stays out of the placeholders.
       const cols = await getUsersColumns();
       const insertCols = ["email", "password", "role", "status"];
-      const insertVals = [email, unusablePassword, "owner", "active"];
+      const insertVals = [email, null, "owner", "active"];
       if (cols.has("full_name")) {
         insertCols.splice(2, 0, "full_name");
         insertVals.splice(2, 0, fullName);
@@ -1274,6 +1308,8 @@ exports.googleLogin = async (req, res) => {
         email: user.email,
         role: user.role,
         emailVerified: true,
+        // false right after a Google signup — the owner can set one in-app
+        hasPassword: !!user.password,
       },
       restaurants,
     });
