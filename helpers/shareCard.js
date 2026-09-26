@@ -85,7 +85,15 @@ function allowedOrigins(req) {
     .split(",")
     .forEach(push);
   if (req) {
-    push(`${req.protocol}://${req.get("host")}`);
+    // Our own host, BOTH schemes: behind Render/Cloudflare the TLS hop ends at
+    // the proxy, so `req.protocol` still reads "http" while every real URL is
+    // https:// — that mismatch made /s/qr.png?data=<our own /s/menu?…> answer
+    // 403 ("URL host is not allowed") even though the URL is ours.
+    const host = req.get("host");
+    if (host) {
+      push(`https://${host}`);
+      push(`http://${host}`);
+    }
     push(req.get("origin"));
   }
   return list;
