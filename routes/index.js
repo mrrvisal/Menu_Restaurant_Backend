@@ -57,6 +57,8 @@ router.post("/auth/register", upload.single("logo"), authCtrl.register);
 router.post("/auth/login/super-admin", authCtrl.superAdminLogin);
 router.post("/auth/login", authCtrl.login);
 router.post("/auth/google", authCtrl.googleLogin);
+// Silent session renewal — exchanges a refresh token for a fresh pair.
+router.post("/auth/refresh", authCtrl.refresh);
 router.get("/auth/verify-email", authCtrl.verifyEmail);
 router.post("/auth/resend-verification", authCtrl.resendVerification);
 router.post("/auth/forgot-password", authCtrl.forgotPassword);

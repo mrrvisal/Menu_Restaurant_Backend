@@ -66,7 +66,18 @@ async function auth(req, res, next) {
 
     next();
   } catch (err) {
-    return res.status(401).json({ error: "Invalid or expired token" });
+    // Tell the client WHY the token was rejected: an expired access token
+    // (code "token_expired") triggers a silent refresh + retry, anything
+    // else is unrecoverable client-side.
+    if (err && err.name === "TokenExpiredError") {
+      return res.status(401).json({
+        error: "Session expired",
+        code: "token_expired",
+      });
+    }
+    return res
+      .status(401)
+      .json({ error: "Invalid or expired token", code: "token_invalid" });
   }
 }
 

@@ -25,6 +25,13 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 const apiRoutes = require("./routes");
 app.use("/api", apiRoutes);
 
+// Public share routes (mounted OUTSIDE /api so links stay short):
+//   GET /s/menu   → Open Graph preview card for one restaurant (Facebook,
+//                   Messenger, Telegram, WhatsApp, Instagram, WeChat, LinkedIn…)
+//   GET /s/qr.png → QR image used by the in-app share sheet
+app.use("/s", require("./routes/shareCard"));
+
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);

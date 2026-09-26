@@ -15,6 +15,14 @@ const {
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
+// Access tokens are short enough to limit damage if leaked, long enough that
+// an open dashboard/SSE stream isn't interrupted. Refresh tokens silently
+// renew both (sliding session) so an ACTIVE user is never signed out —
+// an idle user is asked to log in after JWT_REFRESH_TTL. jsonwebtoken
+// syntax: "15m", "24h", "7d", "30d"…
+const JWT_ACCESS_TTL = process.env.JWT_ACCESS_TTL || "24h";
+const JWT_REFRESH_TTL = process.env.JWT_REFRESH_TTL || "30d";
+
 // Helper: generate unique 6-char link code
 async function generateLinkCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -34,7 +42,7 @@ async function generateLinkCode() {
   return code;
 }
 
-// Helper: generate JWT token (sid = device session id, when tracking is on)
+// Helper: generate JWT access token (sid = device session id, when tracking is on)
 function generateToken(user, sid) {
   const payload = {
     id: user.id,
@@ -42,7 +50,20 @@ function generateToken(user, sid) {
     role: user.role,
   };
   if (sid) payload.sid = sid;
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: "24h" });
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_ACCESS_TTL });
+}
+
+// Helper: generate the long-lived refresh token exchanged at POST
+// /api/auth/refresh for a fresh access + refresh pair. Deliberately minimal
+// claims — email/role are re-read from the DB on every refresh, so a changed
+// email or role is never stale. `typ: "refresh"` stops an access token from
+// being replayed against the refresh endpoint. Stateless by design: device
+// revocation stays enforceable through the embedded `sid`, which the auth
+// middleware (and refresh itself) check against device_sessions.
+function generateRefreshToken(user, sid) {
+  const payload = { id: user.id, typ: "refresh" };
+  if (sid) payload.sid = sid;
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_REFRESH_TTL });
 }
 
 // Helper: create/update the device session for this login.
@@ -387,6 +408,7 @@ async function attemptLogin(
   return {
     data: {
       token,
+      refreshToken: generateRefreshToken(user, sid),
       user: {
         id: user.id,
         email: user.email,
@@ -433,6 +455,92 @@ exports.superAdminLogin = async (req, res) => {
     res.json(result.data);
   } catch (err) {
     console.error("Super admin login error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// ─── REFRESH (silent session renewal) ─────────────────────
+// Exchanges a valid refresh token for a fresh access + refresh pair, so an
+// active user is never signed out at the 24h access-token mark. Stateless
+// (no DB write): the device binding lives in `sid`, and the existing
+// device_sessions revocation check stops a signed-out device from renewing.
+exports.refresh = async (req, res) => {
+  const { refreshToken } = req.body || {};
+  if (!refreshToken)
+    return res.status(400).json({ error: "Refresh token required" });
+
+  let decoded;
+  try {
+    decoded = jwt.verify(refreshToken, JWT_SECRET);
+  } catch (err) {
+    return res.status(401).json({
+      error: "Invalid or expired refresh token",
+      code: "refresh_invalid",
+    });
+  }
+  // Only true refresh tokens may be exchanged — an access token is rejected.
+  if (decoded.typ !== "refresh") {
+    return res.status(401).json({
+      error: "Invalid or expired refresh token",
+      code: "refresh_invalid",
+    });
+  }
+
+  try {
+    const [rows] = await db.query(
+      `SELECT id, email, role, email_verified_at, status, created_at, password
+       FROM users WHERE id = ?`,
+      [decoded.id],
+    );
+    if (!rows.length) {
+      return res.status(401).json({
+        error: "Invalid or expired refresh token",
+        code: "refresh_invalid",
+      });
+    }
+    const user = rows[0];
+
+    if (user.status === "suspended") {
+      return res
+        .status(403)
+        .json({ error: "Your account has been suspended. Contact support." });
+    }
+
+    // The owner may have signed this device out since the token was issued.
+    if (decoded.sid) {
+      try {
+        const [sess] = await db.query(
+          "SELECT revoked FROM device_sessions WHERE session_token = ? LIMIT 1",
+          [decoded.sid],
+        );
+        if (sess.length && sess[0].revoked) {
+          return res.status(401).json({
+            error: "This device has been signed out by the account owner",
+            code: "device_revoked",
+          });
+        }
+      } catch (e) {
+        // Table not migrated yet — don't break renewals, just skip the check
+      }
+    }
+
+    // Issue a rotated pair: the new refresh token restarts the
+    // JWT_REFRESH_TTL window, so the session slides forward on every renewal.
+    res.json({
+      token: generateToken(user, decoded.sid || null),
+      refreshToken: generateRefreshToken(user, decoded.sid || null),
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        emailVerified: !!user.email_verified_at,
+        status: user.status,
+        createdAt: user.created_at,
+        hasPassword: !!user.password,
+      },
+    });
+  } catch (err) {
+    console.error("Refresh error:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -1303,6 +1411,7 @@ exports.googleLogin = async (req, res) => {
 
     res.json({
       token,
+      refreshToken: generateRefreshToken(user, sid),
       user: {
         id: user.id,
         email: user.email,
