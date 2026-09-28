@@ -1,15 +1,8 @@
-// backend/routes/shareCard.js
-// ─── PUBLIC SHARE ROUTES (/s) ──────────────────────────────────────────────
-// Mounted OUTSIDE /api (see server.js) so a shared link stays short and clean:
-//
-//   GET /s/menu?rid=…|restaurant_id=…[&table=5][&to=https://site.example]
-//        Crawler-friendly preview card (Open Graph / Twitter / WeChat meta)
-//        that bounces real visitors to the SPA menu page.
-//
-//   GET /s/qr.png?data=<url>&size=240&color=%2316a34a
-//        PNG QR used by the in-app share sheet (WeChat / scan-to-open).
-//
-// Both routes are public on purpose — chat apps and crawlers cannot log in.
+// Public share routes (mounted outside /api — see server.js):
+//   GET /s/menu   → crawler-friendly Open Graph card that bounces visitors
+//                   to the SPA menu page
+//   GET /s/qr.png → PNG QR used by the in-app share sheet
+// Both are public on purpose — chat apps and crawlers cannot log in.
 const express = require("express");
 const QRCode = require("qrcode");
 const db = require("../config/db");
@@ -28,8 +21,7 @@ const {
 
 const router = express.Router();
 
-// Crawlers cache aggressively; 5 minutes keeps the card fresh for humans while
-// still saving a DB round-trip on chat-app fetches.
+// Crawlers cache hard — 5 min keeps the card fresh while saving DB round-trips.
 const CARD_CACHE = "public, max-age=300, s-maxage=600";
 
 function digitsOnly(value) {
@@ -40,8 +32,7 @@ function digitsOnly(value) {
 // Resolve the restaurant from ?rid=<encrypted token> or ?restaurant_id=<id>.
 // Returns null when the link is generic / the restaurant is gone.
 async function findRestaurant(query) {
-  let id = null;
-  if (query.rid) id = decryptRestaurantId(String(query.rid));
+  let id = query.rid ? decryptRestaurantId(String(query.rid)) : null;
   if (!id) id = parseInt(digitsOnly(query.restaurant_id) || "0", 10) || null;
   if (!id) return null;
 
@@ -58,9 +49,8 @@ async function findRestaurant(query) {
 // ─── GET /s/menu — the link that gets pasted into chats ────────────────────
 router.get("/menu", async (req, res) => {
   const table = digitsOnly(req.query.table);
-  // `to` lets the sharer pin the exact SPA origin; it must be allow-listed
-  // (FRONTEND_URL / SHARE_ALLOWED_ORIGINS) so this stays an open-redirect-free
-  // endpoint.
+  // `to` must be allow-listed (FRONTEND_URL / SHARE_ALLOWED_ORIGINS) so this
+  // endpoint cannot become an open redirect.
   const origin = resolveTargetOrigin(req, req.query.to);
   const params = {
     rid: req.query.rid ? String(req.query.rid) : "",
@@ -73,8 +63,7 @@ router.get("/menu", async (req, res) => {
   try {
     restaurant = await findRestaurant(req.query);
   } catch (err) {
-    // DB hiccup (cold start, maintenance…): still bounce the visitor to the
-    // menu with the generic card instead of showing an error page.
+    // DB hiccup: still bounce the visitor with the generic card.
     console.error("[shareCard] restaurant lookup failed:", err.message);
   }
 
@@ -97,22 +86,18 @@ router.get("/menu", async (req, res) => {
 // ─── GET /s/qr.png — QR of a share/menu URL (WeChat, desktop → phone) ──────
 router.get("/qr.png", async (req, res) => {
   const data = String(req.query.data || "");
-  if (!isWebUrl(data))
+  if (!isWebUrl(data)) {
     return res
       .status(400)
       .json({ error: "A valid http(s) url is required in ?data=" });
-
-  // Only URLs we already know (the SPA, this API, configured origins) can be
-  // turned into an image, so the endpoint cannot be abused as a public QR
-  // generator for arbitrary links.
-  let origin = null;
-  try {
-    origin = new URL(data).origin;
-  } catch {
-    origin = null;
   }
-  if (!origin || !allowedOrigins(req).includes(origin))
+
+  // Only known origins (the SPA, this API, configured origins) may be encoded,
+  // so this cannot be abused as a public QR generator for arbitrary links.
+  const origin = new URL(data).origin;
+  if (!allowedOrigins(req).includes(origin)) {
     return res.status(403).json({ error: "URL host is not allowed" });
+  }
 
   const size = Math.min(600, Math.max(120, parseInt(req.query.size, 10) || 240));
   const dark = sanitizeHexColor(req.query.color, "#111827");

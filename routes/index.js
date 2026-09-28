@@ -2,6 +2,8 @@
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
+const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
 const router = express.Router();
 
 const {
@@ -21,6 +23,7 @@ const { addClient } = require("../services/sse");
 const webpushSvc = require("../services/webpush");
 const db = require("../config/db");
 const { logActivity } = require("../helpers/audit");
+const { sendMail } = require("../config/mailer");
 
 // ─── FILE UPLOAD CONFIG ────────────────────────────────────
 const storage = multer.memoryStorage();
@@ -369,8 +372,6 @@ router.post("/admin/admins", auth, requireSuperAdmin, async (req, res) => {
       return res.status(409).json({ error: "Email already exists", code: "EMAIL_EXISTS" });
     }
 
-    const bcrypt = require("bcryptjs");
-    const crypto = require("crypto");
     const hashedPassword = password ? await bcrypt.hash(password, 10) : "";
     const verifyToken = crypto.randomBytes(32).toString("hex");
 
@@ -397,7 +398,6 @@ router.post("/admin/admins", auth, requireSuperAdmin, async (req, res) => {
       );
     }
 
-    const { logActivity } = require("../helpers/audit");
     logActivity({
       userId: req.user.id,
       action: "create_admin",
@@ -460,7 +460,6 @@ router.patch("/admin/admins/:id", auth, requireSuperAdmin, async (req, res) => {
 
     await db.query(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`, params);
 
-    const { logActivity } = require("../helpers/audit");
     logActivity({
       userId: req.user.id,
       action: "update_admin",
@@ -515,7 +514,6 @@ router.delete("/admin/admins/:id", auth, requireSuperAdmin, async (req, res) => 
 
     await db.query("DELETE FROM users WHERE id = ?", [adminId]);
 
-    const { logActivity } = require("../helpers/audit");
     logActivity({
       userId: req.user.id,
       action: "delete_admin",
@@ -666,7 +664,6 @@ router.post(
       }
 
       // Generate new verification token
-      const crypto = require("crypto");
       const verifyToken = crypto.randomBytes(32).toString("hex");
       await db.query(
         "UPDATE users SET email_verify_token = ? WHERE id = ?",
@@ -676,7 +673,6 @@ router.post(
       // Send verification email
       const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
       const verifyUrl = `${FRONTEND_URL}/verify-email?token=${verifyToken}`;
-      const { sendMail } = require("../config/mailer");
       sendMail({
         to: user.email,
         subject: "Verify your email - Digital Menu",
@@ -760,7 +756,6 @@ router.post(
       let tempPassword = "";
       for (let i = 0; i < 10; i++)
         tempPassword += chars.charAt(Math.floor(Math.random() * chars.length));
-      const bcrypt = require("bcryptjs");
       const hash = await bcrypt.hash(tempPassword, 10);
       await db.query("UPDATE users SET password = ? WHERE id = ?", [
         hash,

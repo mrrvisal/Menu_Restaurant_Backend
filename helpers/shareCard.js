@@ -1,23 +1,8 @@
-// backend/helpers/shareCard.js
-// ─── SHARE CARD (per-restaurant link preview) ──────────────────────────────
-// Facebook, Messenger, Telegram, WhatsApp, LinkedIn, X, Instagram and WeChat
-// do NOT run JavaScript: they fetch the first HTML response of a shared URL.
-// That means an SPA route like /menu?restaurant_id=3 always previews the same
-// generic index.html card — the restaurant name, logo and table were lost.
-//
-// This helper renders a tiny, cacheable HTML document that carries the FULL
-// Open Graph / Twitter / WeChat metadata for ONE restaurant and then bounces
-// real visitors (JS + a visible link) to the SPA menu page.
-//
-// Everything here is pure (no database, no express) so it can be unit-tested.
-
 const DEFAULT_LOGO =
   "https://res.cloudinary.com/daji2ml3y/image/upload/v1783262055/ChatGPT_Image_Jul_5_2026_09_32_32_PM_c6ziic.png";
 
 const DEFAULT_SITE_NAME = "Digital Menu";
 const DEFAULT_ACCENT = "#166534";
-
-// ─── SMALL UTILITIES ───────────────────────────────────────────────────────
 
 function escapeHtml(value = "") {
   return String(value)

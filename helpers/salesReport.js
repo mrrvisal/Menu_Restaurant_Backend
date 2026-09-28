@@ -1,24 +1,11 @@
-// backend/helpers/salesReport.js
-// ─────────────────────────────────────────────────────────────
-// Pure helpers behind the Sales reports screen (dashboard tab):
-//   • period buckets for daily / weekly / monthly revenue series
-//   • top-selling dish aggregation from the orders.items JSON column
-//   • CSV building (Excel-friendly: UTF-8 BOM, CRLF, quoted fields)
-//
-// Nothing here touches the database or Express, so every function can be
-// unit-tested directly (see the checks documented in the README section).
-// ─────────────────────────────────────────────────────────────
-
 const BOM = "\uFEFF";
-const MAX_BUCKETS = 400; // safety cap for very wide ranges (≈13 months of days)
+const MAX_BUCKETS = 400;
 
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
-// ─── CSV ────────────────────────────────────────────────────
-// A value that starts with one of these is treated as a FORMULA by Excel /
-// Google Sheets, so it gets neutralised with a leading apostrophe.
+// CSV formula injection protection & field escaping
 const FORMULA_START = /^[=+\-@\t\r]/;
 const NUMERIC = /^-?\d+(\.\d+)?$/;
 
@@ -30,7 +17,6 @@ function csvEscape(value) {
   return s;
 }
 
-// columns: [{ key, label }] — rows: [{ key: value }]
 function buildCsv(columns, rows) {
   const head = columns.map((c) => csvEscape(c.label)).join(",");
   const body = (rows || [])
@@ -39,7 +25,7 @@ function buildCsv(columns, rows) {
   return BOM + head + "\r\n" + (body ? body + "\r\n" : "");
 }
 
-// Localised column headers / metric names for the exported CSV files.
+// Localized column headers / metric names for CSV export
 const CSV_LABELS = {
   en: {
     period: "Period",

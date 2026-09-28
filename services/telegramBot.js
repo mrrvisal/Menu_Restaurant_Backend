@@ -1,6 +1,3 @@
-// backend/services/telegramBot.js
-// Enhanced Telegram bot using Telegraf with inline keyboards for order management
-
 const { Telegraf, Markup } = require("telegraf");
 const db = require("../config/db");
 const { broadcast } = require("./sse");
@@ -21,7 +18,6 @@ function getBot() {
 
   // /start - Welcome & instructions
   bot.start(async (ctx) => {
-    const firstName = ctx.from?.first_name || "";
     await ctx.reply(
       `👋 សូមស្វាគមន៍មកកាន់ Digital Menu!\n\n` +
         `ដើម្បីភ្ជាប់គណនីភោជនីយដ្ឋានរបស់អ្នក សូមប្រើពាក្យបញ្ជា៖\n\n` +

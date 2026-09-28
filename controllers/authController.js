@@ -1,8 +1,7 @@
-// backend/controllers/authController.js
-const db = require("../config/db");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
+const db = require("../config/db");
 const imagekit = require("../config/imagekit");
 const { sendMail } = require("../config/mailer");
 const { validatePassword } = require("../helpers/passwordPolicy");
@@ -15,15 +14,11 @@ const {
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
-// Access tokens are short enough to limit damage if leaked, long enough that
-// an open dashboard/SSE stream isn't interrupted. Refresh tokens silently
-// renew both (sliding session) so an ACTIVE user is never signed out —
-// an idle user is asked to log in after JWT_REFRESH_TTL. jsonwebtoken
-// syntax: "15m", "24h", "7d", "30d"…
+// Token lifetimes
 const JWT_ACCESS_TTL = process.env.JWT_ACCESS_TTL || "24h";
 const JWT_REFRESH_TTL = process.env.JWT_REFRESH_TTL || "30d";
 
-// Helper: generate unique 6-char link code
+// Helper: generate unique 6-char link code for Telegram
 async function generateLinkCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code;
@@ -42,7 +37,7 @@ async function generateLinkCode() {
   return code;
 }
 
-// Helper: generate JWT access token (sid = device session id, when tracking is on)
+// Helper: generate JWT access token
 function generateToken(user, sid) {
   const payload = {
     id: user.id,
@@ -53,26 +48,19 @@ function generateToken(user, sid) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_ACCESS_TTL });
 }
 
-// Helper: generate the long-lived refresh token exchanged at POST
-// /api/auth/refresh for a fresh access + refresh pair. Deliberately minimal
-// claims — email/role are re-read from the DB on every refresh, so a changed
-// email or role is never stale. `typ: "refresh"` stops an access token from
-// being replayed against the refresh endpoint. Stateless by design: device
-// revocation stays enforceable through the embedded `sid`, which the auth
-// middleware (and refresh itself) check against device_sessions.
+// Helper: generate the long-lived refresh token (exchanged at /api/auth/refresh).
+// Minimal claims by design — email/role are re-read from the DB on refresh.
+// `typ: "refresh"` blocks replaying an access token; `sid` keeps device
+// revocation enforceable.
 function generateRefreshToken(user, sid) {
   const payload = { id: user.id, typ: "refresh" };
   if (sid) payload.sid = sid;
   return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_REFRESH_TTL });
 }
 
-// Helper: create/update the device session for this login.
-// Records WHO logged in from WHERE: device id, name, type, browser, OS,
-// screen, timezone, language, platform, hardware, raw user-agent, IP
-// (+ best-effort city/country/coordinates/ASN lookup).
-// Also writes one audit row per login into device_login_history.
-// Returns the new session id (sid) to embed in the JWT, or null if the
-// device_sessions table isn't available (login still proceeds).
+// Helper: create/update the device session for this login (device info + IP
+// geolocation + one device_login_history row). Returns the new session id
+// (sid) to embed in the JWT, or null when the device tables are unavailable.
 async function upsertDeviceSession(req, user, method = "email") {
   const info = extractDeviceInfo(req);
   const sid = crypto.randomBytes(16).toString("hex");
@@ -309,12 +297,9 @@ exports.register = async (req, res) => {
 };
 
 // ─── LOGIN ──────────────────────────────────────────────────
-// Shared credential check for BOTH login entries:
-//   • POST /api/auth/login               → owners only
-//   • POST /api/auth/login/super-admin   → super admins only
-// The role gate guarantees a super admin can ONLY obtain a session through the
-// dedicated Super Admin portal endpoint (returned as `code` so the frontend can
-// render a helpful redirect instead of a generic "Invalid credentials").
+// Shared credential check for BOTH login entries (owners vs super admins).
+// The role gate guarantees a super admin can only sign in through the
+// dedicated portal endpoint (returned as `code` for a helpful frontend hint).
 async function attemptLogin(
   req,
   email,
@@ -460,10 +445,9 @@ exports.superAdminLogin = async (req, res) => {
 };
 
 // ─── REFRESH (silent session renewal) ─────────────────────
-// Exchanges a valid refresh token for a fresh access + refresh pair, so an
-// active user is never signed out at the 24h access-token mark. Stateless
-// (no DB write): the device binding lives in `sid`, and the existing
-// device_sessions revocation check stops a signed-out device from renewing.
+// Exchanges a valid refresh token for a fresh access + refresh pair so an
+// active user is never signed out. Stateless — device revocation still
+// applies through the `sid` check against device_sessions.
 exports.refresh = async (req, res) => {
   const { refreshToken } = req.body || {};
   if (!refreshToken)
@@ -790,15 +774,11 @@ exports.me = async (req, res) => {
 };
 
 // ─── UPDATE ACCOUNT (email / password) ──────────────────────
-// Lets a logged-in user change their OWN email address and/or password.
-//   • Email change  → a fresh verification token is issued, the address is
-//     marked unverified and the account returns to `inactive` until the NEW
-//     email is verified (protects against typo'd addresses locking the owner
-//     out of their account).
-//   • Password change → re-hashed with bcrypt (same policy as registration).
-//   • Both changes require the CURRENT password, except for accounts that have
-//     no password set (Google-only signups) — their session is the proof.
-// A fresh JWT is returned because the old one carries the stale email.
+// Lets a logged-in user change their OWN email and/or password.
+//   • Email change → re-verification required (account back to `inactive`)
+//   • Password change → re-hashed with the shared password policy
+//   • Current password required, except for Google-only accounts (session is
+//     the proof). A fresh JWT is returned because the old one has stale claims.
 exports.updateAccount = async (req, res) => {
   const { email, currentPassword, newPassword } = req.body;
   try {

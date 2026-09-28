@@ -36,16 +36,35 @@ function decryptRestaurantId(token) {
   }
 }
 
-// Safe composite: never throws on overlay/background problems — degrades gracefully.
+// Safe composite: degrades gracefully without throwing
 function safeComposite(base, overlay, opts = {}) {
-  return new Promise((resolve) => {
-    sharp(base)
-      .composite([{ ...opts, input: overlay }])
-      .png()
-      .toBuffer()
-      .then(resolve)
-      .catch(() => resolve(null));
-  });
+  return sharp(base)
+    .composite([{ ...opts, input: overlay }])
+    .png()
+    .toBuffer()
+    .catch(() => null);
+}
+
+// Fetch logo image and render with rounded white background
+async function prepareLogoBuffer(url, size, radius) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  const maskSvg = Buffer.from(
+    `<svg width="${size}" height="${size}">
+      <rect x="0" y="0" width="${size}" height="${size}" rx="${radius}" ry="${radius}" fill="white" />
+    </svg>`,
+  );
+
+  return sharp(buffer, { failOn: "none" })
+    .resize(size, size, {
+      fit: "fill",
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    })
+    .composite([{ input: maskSvg, blend: "dest-over" }])
+    .png()
+    .toBuffer();
 }
 
 async function generateQrWithLogo(data, opts = {}) {
@@ -61,175 +80,80 @@ async function generateQrWithLogo(data, opts = {}) {
   const qrBuffer = await QRCode.toBuffer(data, {
     width,
     margin,
-    color: {
-      dark: darkColor,
-      light: lightColor,
-    },
+    color: { dark: darkColor, light: lightColor },
     errorCorrectionLevel: "H",
   });
 
   const logoSize = Math.round(width * 0.22);
   const cornerRadius = Math.round(logoSize * 0.15);
-
   let finalBuffer = qrBuffer;
 
-  // ─── Dynamic restaurant logo / default logo ───────────────
   const defaultLogoUrl =
     "https://res.cloudinary.com/daji2ml3y/image/upload/v1783262055/ChatGPT_Image_Jul_5_2026_09_32_32_PM_c6ziic.png";
-
-  // If logoUrl is null, undefined, or empty,
-  // use the default logo
-  const finalLogoUrl =
+  const targetLogoUrl =
     typeof logoUrl === "string" && logoUrl.trim()
       ? logoUrl.trim()
       : defaultLogoUrl;
 
   try {
-    console.log("[qrWithLogo] Using logo:", finalLogoUrl);
-
-    const logoResp = await fetch(finalLogoUrl);
-
-    if (!logoResp.ok) {
-      throw new Error(`HTTP ${logoResp.status}`);
-    }
-
-    const logoBuffer = Buffer.from(await logoResp.arrayBuffer());
-
-    const logoRounded = await sharp(logoBuffer, {
-      failOn: "none",
-    })
-      .resize(logoSize, logoSize, {
-        fit: "fill",
-        background: {
-          r: 0,
-          g: 0,
-          b: 0,
-          alpha: 0,
-        },
-      })
-      .composite([
-        {
-          input: Buffer.from(
-            `<svg width="${logoSize}" height="${logoSize}">
-              <rect
-                x="0"
-                y="0"
-                width="${logoSize}"
-                height="${logoSize}"
-                rx="${cornerRadius}"
-                ry="${cornerRadius}"
-                fill="white"
-              />
-            </svg>`,
-          ),
-          blend: "dest-over",
-        },
-      ])
-      .png()
-      .toBuffer();
-
+    const logoRounded = await prepareLogoBuffer(
+      targetLogoUrl,
+      logoSize,
+      cornerRadius,
+    );
     const out = await safeComposite(qrBuffer, logoRounded, {
       top: Math.round((width - logoSize) / 2),
       left: Math.round((width - logoSize) / 2),
     });
+    if (out) finalBuffer = out;
+  } catch (err) {
+    console.error("[qrWithLogo] Primary logo error:", err.message);
 
-    if (out) {
-      finalBuffer = out;
-    } else {
-      console.error("[qrWithLogo] logo composite skipped");
-    }
-  } catch (logoErr) {
-    console.error(
-      "[qrWithLogo] logo error:",
-      logoErr.message,
-      "logoUrl:",
-      logoUrl,
-    );
-
-    // If restaurant logo fails, try default logo
-    if (finalLogoUrl !== defaultLogoUrl) {
+    if (targetLogoUrl !== defaultLogoUrl) {
       try {
-        const defaultResp = await fetch(defaultLogoUrl);
-
-        if (!defaultResp.ok) {
-          throw new Error(`HTTP ${defaultResp.status}`);
-        }
-
-        const defaultBuffer = Buffer.from(await defaultResp.arrayBuffer());
-
-        const defaultRounded = await sharp(defaultBuffer, {
-          failOn: "none",
-        })
-          .resize(logoSize, logoSize, {
-            fit: "fill",
-            background: {
-              r: 0,
-              g: 0,
-              b: 0,
-              alpha: 0,
-            },
-          })
-          .png()
-          .toBuffer();
-
-        const out = await safeComposite(qrBuffer, defaultRounded, {
+        const fallbackRounded = await prepareLogoBuffer(
+          defaultLogoUrl,
+          logoSize,
+          cornerRadius,
+        );
+        const out = await safeComposite(qrBuffer, fallbackRounded, {
           top: Math.round((width - logoSize) / 2),
           left: Math.round((width - logoSize) / 2),
         });
-
-        if (out) {
-          finalBuffer = out;
-        }
-      } catch (defaultErr) {
-        console.error("[qrWithLogo] default logo error:", defaultErr.message);
-
-        // QR without logo
-        finalBuffer = qrBuffer;
+        if (out) finalBuffer = out;
+      } catch (fallbackErr) {
+        console.error(
+          "[qrWithLogo] Fallback logo error:",
+          fallbackErr.message,
+        );
       }
     }
   }
 
-  // ─── Table text footer ────────────────────────────────────
+  // Table text footer
   if (tableText) {
     try {
       const textHeight = Math.round(width * 0.12);
       const fontSize = Math.round(textHeight * 0.55);
 
       const safeText = String(tableText)
-        .replace(/&/g, String.fromCharCode(38))
-        .replace(/</g, String.fromCharCode(60))
-        .replace(/>/g, String.fromCharCode(62))
-        .replace(/"/g, String.fromCharCode(34))
-        .replace(/'/g, String.fromCharCode(39));
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&apos;");
 
       const svgText = `
         <svg width="${width}" height="${textHeight}">
-          <rect
-            x="0"
-            y="0"
-            width="${width}"
-            height="${textHeight}"
-            fill="${lightColor}"
-          />
-
-          <text
-            x="50%"
-            y="55%"
-            font-family="sans-serif"
-            font-size="${fontSize}"
-            font-weight="bold"
-            fill="${darkColor}"
-            text-anchor="middle"
-          >
+          <rect x="0" y="0" width="${width}" height="${textHeight}" fill="${lightColor}" />
+          <text x="50%" y="55%" font-family="sans-serif" font-size="${fontSize}" font-weight="bold" fill="${darkColor}" text-anchor="middle">
             ${safeText}
           </text>
         </svg>
       `;
 
       const extended = await sharp(finalBuffer)
-        .extend({
-          bottom: textHeight,
-        })
+        .extend({ bottom: textHeight })
         .png()
         .toBuffer();
 
@@ -238,15 +162,12 @@ async function generateQrWithLogo(data, opts = {}) {
         left: 0,
       });
 
-      if (out) {
-        finalBuffer = out;
-      } else {
-        console.error("[qrWithLogo] text composite skipped");
-      }
+      if (out) finalBuffer = out;
     } catch (textErr) {
-      console.error("[qrWithLogo] text error:", textErr.message);
+      console.error("[qrWithLogo] Text composite error:", textErr.message);
     }
   }
+
   return finalBuffer;
 }
 

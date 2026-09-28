@@ -1,12 +1,6 @@
-// backend/controllers/categoriesController.js
 const db = require("../config/db");
 
-// Helper: get restaurant_id for public requests
-// Resolve which restaurant a request targets (see foodsController — never
-// fall back to a hard-coded restaurant: that leaked another account's data).
-//   • explicit ?restaurant_id → it (public menu: guests / QR links pass this)
-//   • logged-in user          → their FIRST restaurant
-//   • otherwise               → null (the handler answers 400)
+// Helper: resolve restaurant ID for public or authenticated requests
 async function getRestaurantId(req) {
   if (req.query.restaurant_id) {
     const id = parseInt(req.query.restaurant_id, 10);
@@ -26,15 +20,17 @@ async function getRestaurantId(req) {
 exports.getAll = async (req, res) => {
   try {
     const restaurantId = await getRestaurantId(req);
-    if (!restaurantId)
+    if (!restaurantId) {
       return res
         .status(400)
         .json({ error: "No restaurant found — specify ?restaurant_id" });
-    const { menu_id } = req.query;
+    }
 
+    const { menu_id } = req.query;
     let sql =
       "SELECT id, restaurant_id, menu_id, name FROM categories WHERE restaurant_id = ?";
     const params = [restaurantId];
+
     if (menu_id) {
       sql += " AND menu_id = ?";
       params.push(menu_id);
@@ -43,12 +39,7 @@ exports.getAll = async (req, res) => {
 
     let [rows] = await db.query(sql, params);
 
-    // Public menu pages fetch WITHOUT menu_id, so every category row across
-    // the restaurant's menus comes back — and the same name may exist more
-    // than once (created under different menus / by the older bug that wrote
-    // new categories into the first restaurant). Collapse them into ONE entry
-    // per unique name so the customer-facing tabs never show duplicates.
-    // Rows arrive ordered by id ASC, so the first occurrence (lowest id) wins.
+    // Collapse duplicate category names for public menu views
     if (!menu_id) {
       const seen = new Set();
       rows = rows.filter((cat) => {

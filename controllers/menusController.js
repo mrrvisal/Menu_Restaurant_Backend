@@ -1,27 +1,26 @@
-// backend/controllers/menusController.js
 const db = require("../config/db");
 
-// Helper: fetch owner's restaurants so an owner can act on any of them.
+// Helper: fetch owner's restaurants so an owner can act on any of them
 async function getOwnerRestaurant(req, restaurantId) {
   if (!restaurantId) return null;
   const [rows] = await db.query(
     "SELECT id FROM restaurants WHERE id = ? AND owner_id = ?",
-    [parseInt(restaurantId), req.user.id]
+    [parseInt(restaurantId, 10), req.user.id],
   );
   return rows.length ? rows[0].id : null;
 }
 
 // GET /api/menus?restaurant_id=X
-// Public read of a restaurant's menus (used by the guest menu page).
 exports.getAll = async (req, res) => {
   try {
-    const restaurantId = parseInt(req.query.restaurant_id || 0);
-    if (!restaurantId)
+    const restaurantId = parseInt(req.query.restaurant_id || 0, 10);
+    if (!restaurantId) {
       return res.status(400).json({ error: "restaurant_id is required" });
+    }
 
     const [rows] = await db.query(
       "SELECT id, restaurant_id, name, sort_order, status FROM menus WHERE restaurant_id = ? AND status = 'active' ORDER BY sort_order ASC, id ASC",
-      [restaurantId]
+      [restaurantId],
     );
     res.json(rows);
   } catch (err) {
@@ -30,24 +29,27 @@ exports.getAll = async (req, res) => {
   }
 };
 
-// POST /api/menus  (owner)  body: { restaurant_id, name }
+// POST /api/menus
 exports.create = async (req, res) => {
   try {
     const { restaurant_id, name } = req.body;
-    if (!restaurant_id)
+    if (!restaurant_id) {
       return res.status(400).json({ error: "restaurant_id is required" });
-    if (!name || !name.trim())
+    }
+    if (!name || !name.trim()) {
       return res.status(400).json({ error: "Menu name is required" });
+    }
 
     const restId = await getOwnerRestaurant(req, restaurant_id);
-    if (!restId)
+    if (!restId) {
       return res
         .status(404)
         .json({ error: "Restaurant not found or not owned by you" });
+    }
 
     const [result] = await db.query(
       "INSERT INTO menus (restaurant_id, name, sort_order) VALUES (?, ?, (SELECT COALESCE(MAX(sort_order),0)+1 FROM (SELECT sort_order FROM menus WHERE restaurant_id = ?) m))",
-      [restId, name.trim(), restId]
+      [restId, name.trim(), restId],
     );
     const [row] = await db.query("SELECT * FROM menus WHERE id = ?", [
       result.insertId,
@@ -59,13 +61,13 @@ exports.create = async (req, res) => {
   }
 };
 
-// PATCH /api/menus/:id  (owner)  body: { name }
+// PATCH /api/menus/:id
 exports.update = async (req, res) => {
   try {
     const { name } = req.body;
     const [rows] = await db.query(
       "SELECT m.id FROM menus m JOIN restaurants r ON r.id = m.restaurant_id WHERE m.id = ? AND r.owner_id = ?",
-      [req.params.id, req.user.id]
+      [req.params.id, req.user.id],
     );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
 
@@ -83,12 +85,12 @@ exports.update = async (req, res) => {
   }
 };
 
-// DELETE /api/menus/:id  (owner)
+// DELETE /api/menus/:id
 exports.remove = async (req, res) => {
   try {
     const [rows] = await db.query(
       "SELECT m.id FROM menus m JOIN restaurants r ON r.id = m.restaurant_id WHERE m.id = ? AND r.owner_id = ?",
-      [req.params.id, req.user.id]
+      [req.params.id, req.user.id],
     );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
 

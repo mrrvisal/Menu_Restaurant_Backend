@@ -1,15 +1,4 @@
-// backend/helpers/passwordPolicy.js
-// Shared password policy used by account creation and password resets.
-//
-// Policy (enforced server-side; mirrored in the frontend meter):
-//   - at least 8 characters
-//   - at least one lowercase letter  (a-z)
-//   - at least one uppercase letter  (A-Z)
-//   - at least one digit             (0-9)
-//   - at least one special character (!@#$%^&* … any non-alphanumeric)
 const PASSWORD_MIN_LENGTH = 8;
-
-// Any printable character that is NOT a letter or digit (spaces don't count)
 const SPECIAL_RE = /[^A-Za-z0-9\s]/;
 
 const RULES = [
@@ -40,7 +29,6 @@ const RULES = [
   },
 ];
 
-// Returns { valid, errors } — errors is a human-readable list of unmet rules.
 function validatePassword(password) {
   const errors = RULES.filter((rule) => !rule.test(password)).map(
     (rule) => rule.label,
@@ -53,3 +41,4 @@ module.exports = {
   RULES,
   validatePassword,
 };
+

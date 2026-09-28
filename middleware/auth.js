@@ -1,23 +1,23 @@
-// backend/middleware/auth.js
 const jwt = require("jsonwebtoken");
 const db = require("../config/db");
-const JWT_SECRET = process.env.JWT_SECRET || "secret";
 
-// In-memory throttle so we don't hammer the DB with last-active updates:
-// each session's activity is persisted at most once per minute.
+const JWT_SECRET = process.env.JWT_SECRET || "secret";
+const THROTTLE_TTL = 10 * 60 * 1000; // 10 minutes
+const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
+
+// In-memory throttle for device last-active updates (persisted at most once per minute)
 const activityThrottle = new Map();
+
 setInterval(() => {
   const now = Date.now();
   for (const [key, ts] of activityThrottle) {
-    if (now - ts > 10 * 60 * 1000) activityThrottle.delete(key);
+    if (now - ts > THROTTLE_TTL) {
+      activityThrottle.delete(key);
+    }
   }
-}, 5 * 60 * 1000).unref();
+}, CLEANUP_INTERVAL).unref();
 
-// Verify JWT token, attach user to request, and enforce device sessions:
-// - a token carrying `sid` is rejected if its device session was revoked
-//   (owner removed the device from the account)
-// - the session's last_active_at is updated (throttled) so the owner can
-//   see where/when each device was last used.
+// Verify JWT token, attach user, and enforce active device session
 async function auth(req, res, next) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith("Bearer ")) {
@@ -25,6 +25,7 @@ async function auth(req, res, next) {
   }
 
   const token = header.split(" ")[1];
+
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     req.user = {
@@ -34,7 +35,7 @@ async function auth(req, res, next) {
       sid: decoded.sid || null,
     };
 
-    // ── Device session enforcement (only for tokens issued with a sid) ──
+    // Device session enforcement
     if (decoded.sid) {
       let rows = [];
       try {
@@ -42,17 +43,18 @@ async function auth(req, res, next) {
           "SELECT id, revoked FROM device_sessions WHERE session_token = ? LIMIT 1",
           [decoded.sid],
         );
-      } catch (e) {
-        // Table not migrated yet — don't break logins, just skip checks
+      } catch (_) {
         rows = [];
       }
+
       if (rows.length && rows[0].revoked) {
         return res.status(401).json({
           error: "This device has been signed out by the account owner",
           code: "device_revoked",
         });
       }
-      // Throttled "last active" heartbeat (fire-and-forget)
+
+      // Throttled heartbeat (fire-and-forget)
       const now = Date.now();
       const last = activityThrottle.get(decoded.sid) || 0;
       if (now - last > 60 * 1000) {
@@ -66,22 +68,21 @@ async function auth(req, res, next) {
 
     next();
   } catch (err) {
-    // Tell the client WHY the token was rejected: an expired access token
-    // (code "token_expired") triggers a silent refresh + retry, anything
-    // else is unrecoverable client-side.
     if (err && err.name === "TokenExpiredError") {
       return res.status(401).json({
         error: "Session expired",
         code: "token_expired",
       });
     }
-    return res
-      .status(401)
-      .json({ error: "Invalid or expired token", code: "token_invalid" });
+
+    return res.status(401).json({
+      error: "Invalid or expired token",
+      code: "token_invalid",
+    });
   }
 }
 
-// Optional auth: attach user if token present, but don't reject if missing
+// Optional auth: attach user if token exists, continue if not
 function softAuth(req, res, next) {
   const header = req.headers.authorization;
   if (header && header.startsWith("Bearer ")) {
@@ -94,15 +95,14 @@ function softAuth(req, res, next) {
         role: decoded.role,
         sid: decoded.sid || null,
       };
-    } catch (err) {
-      // Token invalid — just continue without user
+    } catch (_) {
+      // Ignore invalid token in soft auth
     }
   }
   next();
 }
 
-
-// Role-based access: require specific role(s)
+// Role-based authorization
 function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.user) {
@@ -117,13 +117,8 @@ function requireRole(...roles) {
   };
 }
 
-// Super admin only
 const requireSuperAdmin = requireRole("super_admin");
-
-// Owner only
 const requireOwner = requireRole("owner");
-
-// Owner or super admin
 const requireOwnerOrAdmin = requireRole("owner", "super_admin");
 
 module.exports = {
@@ -134,3 +129,4 @@ module.exports = {
   requireOwner,
   requireOwnerOrAdmin,
 };
+

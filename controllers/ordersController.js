@@ -1,7 +1,6 @@
-// backend/controllers/ordersController.js
+const crypto = require("crypto");
 const db = require("../config/db");
 const { sendOrderNotification } = require("../services/telegramBot");
-const crypto = require("crypto");
 const { broadcast, addOrderClient, emitOrder } = require("../services/sse");
 const webpushSvc = require("../services/webpush");
 const { logActivity } = require("../helpers/audit");
@@ -11,36 +10,30 @@ const salesReport = require("../helpers/salesReport");
 exports.create = async (req, res) => {
   const { table_no, note, items, restaurant_id, customer_name } = req.body;
 
-  if (!table_no || !table_no.trim())
+  if (!table_no || !table_no.trim()) {
     return res.status(400).json({ error: "Table number is required" });
-  if (!items || !items.length)
+  }
+  if (!items || !items.length) {
     return res.status(400).json({ error: "Order items are required" });
+  }
 
-  // Determine restaurant_id
-  let restId = null;
-  if (restaurant_id) restId = parseInt(restaurant_id);
-  else restId = 1;
-
-  let total = 0;
-  items.forEach((item) => {
-    total += item.price * item.qty;
-  });
+  const restId = restaurant_id ? parseInt(restaurant_id, 10) : 1;
+  const total = items.reduce((sum, item) => sum + item.price * item.qty, 0);
 
   try {
     const [restaurants] = await db.query(
       "SELECT id, name, telegram_chat_id, default_language FROM restaurants WHERE id = ?",
       [restId],
     );
-    if (!restaurants.length)
+    if (!restaurants.length) {
       return res.status(404).json({ error: "Restaurant not found" });
+    }
     const restaurant = restaurants[0];
 
-    // A one-time token lets THIS guest follow their order on /track.
-    // Self-healing: if migration v16 hasn't been applied yet (no
-    // track_token column), fall back to the legacy insert so ordering
-    // NEVER breaks — the order is just placed without a tracking link.
+    // Tracking token for guest
     let trackToken = crypto.randomBytes(16).toString("hex");
     let orderResult;
+
     try {
       [orderResult] = await db.query(
         "INSERT INTO orders (restaurant_id, table_no, note, items, total, status, customer_name, track_token) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
@@ -56,7 +49,7 @@ exports.create = async (req, res) => {
       );
     } catch (insertErr) {
       if (insertErr?.code === "ER_BAD_FIELD_ERROR") {
-        // Unknown column 'track_token' → legacy schema, no tracking link
+        // Fallback for legacy schema without track_token
         trackToken = null;
         [orderResult] = await db.query(
           "INSERT INTO orders (restaurant_id, table_no, note, items, total, status, customer_name) VALUES (?, ?, ?, ?, ?, 'pending', ?)",

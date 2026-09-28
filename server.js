@@ -1,15 +1,16 @@
-// backend/server.js
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
-const path = require("path");
 require("dotenv").config();
+
+const apiRoutes = require("./routes");
+const shareCardRoutes = require("./routes/shareCard");
+const { getBot } = require("./services/telegramBot");
 
 const app = express();
 const PORT = process.env.PORT || 5001;
 
-// Middleware
-// `exposedHeaders` lets the dashboard read the filename of a CSV download
-// (Content-Disposition is not readable by browser JS unless it is exposed).
+// Middlewares
 app.use(
   cors({
     exposedHeaders: ["Content-Disposition"],
@@ -18,21 +19,14 @@ app.use(
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static files (uploads)
+// Static uploads
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Routes
-const apiRoutes = require("./routes");
 app.use("/api", apiRoutes);
+app.use("/s", shareCardRoutes);
 
-// Public share routes (mounted OUTSIDE /api so links stay short):
-//   GET /s/menu   → Open Graph preview card for one restaurant (Facebook,
-//                   Messenger, Telegram, WhatsApp, Instagram, WeChat, LinkedIn…)
-//   GET /s/qr.png → QR image used by the in-app share sheet
-app.use("/s", require("./routes/shareCard"));
-
-
-// Error handling middleware
+// Error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
   if (err.message === "Only images allowed") {
@@ -43,30 +37,30 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Something went wrong!" });
 });
 
+// Telegram bot lifecycle
+const bot = getBot();
+
+const stopBot = (signal) => {
+  if (bot) {
+    bot.stop(signal);
+  }
+};
+
+process.once("SIGINT", () => stopBot("SIGINT"));
+process.once("SIGTERM", () => stopBot("SIGTERM"));
+
 // Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 
-  // Launch Telegram bot with long polling
-  const { getBot } = require("./services/telegramBot");
-  const bot = getBot();
   if (bot) {
-    bot.launch().then(() => {
-      console.log("🤖 Telegram bot started (long polling)");
-    }).catch((err) => {
-      console.error("Failed to start Telegram bot:", err.message);
-    });
+    bot
+      .launch()
+      .then(() => {
+        console.log("🤖 Telegram bot started (long polling)");
+      })
+      .catch((err) => {
+        console.error("Failed to start Telegram bot:", err.message);
+      });
   }
-});
-
-// Graceful stop for the bot
-process.once("SIGINT", () => {
-  const { getBot } = require("./services/telegramBot");
-  const bot = getBot();
-  if (bot) bot.stop("SIGINT");
-});
-process.once("SIGTERM", () => {
-  const { getBot } = require("./services/telegramBot");
-  const bot = getBot();
-  if (bot) bot.stop("SIGTERM");
 });
