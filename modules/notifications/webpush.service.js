@@ -1,5 +1,5 @@
 const webpush = require("web-push");
-const db = require("../config/db");
+const db = require("../../config/db");
 
 const PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
 const PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
@@ -75,4 +75,3 @@ async function sendToSubscription(row, payload) {
 }
 
 module.exports = { isConfigured, sendToUser, sendToRestaurantOwner };
-

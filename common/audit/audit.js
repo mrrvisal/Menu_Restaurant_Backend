@@ -1,4 +1,4 @@
-const db = require("../config/db");
+const db = require("../../config/db");
 
 // Fire-and-forget activity logging (never throws or blocks requests)
 async function logActivity({

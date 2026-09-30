@@ -1,6 +1,6 @@
 const { Telegraf, Markup } = require("telegraf");
-const db = require("../config/db");
-const { broadcast } = require("./sse");
+const db = require("../../config/db");
+const { broadcast } = require("../../common/realtime/sse");
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 let bot = null;
@@ -24,10 +24,7 @@ function getBot() {
         `/link លេខកូដភ្ជាប់\n\n` +
         `ឧទាហរណ៍: /link ABC123\n\n` +
         `លេខកូដភ្ជាប់អាចរកបានក្នុង Admin Panel → Telegram Settings`,
-      Markup.keyboard([
-        ["📋 កម្មង់ថ្មី", "📊 ស្ថិតិ"],
-        ["❓ ជំនួយ"],
-      ])
+      Markup.keyboard([["📋 កម្មង់ថ្មី", "📊 ស្ថិតិ"], ["❓ ជំនួយ"]])
         .resize()
         .oneTime(),
     );
@@ -79,10 +76,7 @@ function getBot() {
           `🏪 ភោជនីយដ្ឋាន: ${restaurant.name}\n` +
           `🆔 Chat ID: ${chatId}\n\n` +
           `ឥឡូវនេះ អ្នកនឹងទទួលបានការជូនដំណឹងរាល់ពេលមានការកម្មង់ថ្មី! 🎉`,
-        Markup.keyboard([
-          ["📋 កម្មង់ថ្មី", "📊 ស្ថិតិ"],
-          ["❓ ជំនួយ"],
-        ])
+        Markup.keyboard([["📋 កម្មង់ថ្មី", "📊 ស្ថិតិ"], ["❓ ជំនួយ"]])
           .resize()
           .oneTime(),
       );
@@ -112,10 +106,7 @@ function getBot() {
         `/stats - មើលស្ថិតិប្រាក់ចំណូល\n` +
         `/help - ជំនួយ\n\n` +
         `ឬប្រើប៊ូតុងខាងក្រោម 👇`,
-      Markup.keyboard([
-        ["📋 កម្មង់ថ្មី", "📊 ស្ថិតិ"],
-        ["❓ ជំនួយ"],
-      ])
+      Markup.keyboard([["📋 កម្មង់ថ្មី", "📊 ស្ថិតិ"], ["❓ ជំនួយ"]])
         .resize()
         .oneTime(),
     );
@@ -138,10 +129,7 @@ function getBot() {
         `• ចុចប៊ូតុងក្រោមសារដើម្បីប្តូរស្ថានភាពកម្មង់\n` +
         `• ប្រើ /orders ដើម្បីមើលកម្មង់ថ្មីៗ\n` +
         `• ប្រើ /stats ដើម្បីមើលស្ថិតិ`,
-      Markup.keyboard([
-        ["📋 កម្មង់ថ្មី", "📊 ស្ថិតិ"],
-        ["❓ ជំនួយ"],
-      ])
+      Markup.keyboard([["📋 កម្មង់ថ្មី", "📊 ស្ថិតិ"], ["❓ ជំនួយ"]])
         .resize()
         .oneTime(),
     );
@@ -174,7 +162,9 @@ function getBot() {
 
       const order = orders[0];
       if (order.status === newStatus) {
-        return ctx.answerCbQuery(`⚠️ កម្មង់នេះស្ថានភាព "${getStatusLabel(newStatus)}" រួចហើយ`);
+        return ctx.answerCbQuery(
+          `⚠️ កម្មង់នេះស្ថានភាព "${getStatusLabel(newStatus)}" រួចហើយ`,
+        );
       }
 
       // Update status
@@ -221,10 +211,12 @@ function getBot() {
         });
       } catch (editErr) {
         // If edit fails (e.g. message too old), just acknowledge
-        console.log("Could not edit message:", editErr.message);
+        console.log("Telegram message edit failed");
       }
 
-      await ctx.answerCbQuery(`✅ ប្តូរស្ថានភាពទៅ "${getStatusLabel(newStatus)}" រួចរាល់!`);
+      await ctx.answerCbQuery(
+        `✅ ប្តូរស្ថានភាពទៅ "${getStatusLabel(newStatus)}" រួចរាល់!`,
+      );
     } catch (err) {
       console.error("Order status update error:", err.message);
       await ctx.answerCbQuery("❌ មានបញ្ហា សូមព្យាយាមម្តងទៀត");
@@ -299,7 +291,9 @@ function getBot() {
       }
 
       if (rows.length > 5) {
-        await ctx.reply(`📊 បង្ហាញ 5 កម្មង់ចុងក្រោយក្នុងចំណោម ${rows.length} កម្មង់។`);
+        await ctx.reply(
+          `📊 បង្ហាញ 5 កម្មង់ចុងក្រោយក្នុងចំណោម ${rows.length} កម្មង់។`,
+        );
       }
     } catch (err) {
       console.error("Show orders error:", err.message);
@@ -365,7 +359,8 @@ function getBot() {
         [restaurantId],
       );
 
-      const text = `📊 ស្ថិតិភោជនីយដ្ឋាន: ${restaurants[0].name}\n\n` +
+      const text =
+        `📊 ស្ថិតិភោជនីយដ្ឋាន: ${restaurants[0].name}\n\n` +
         `📅 ថ្ងៃនេះ:\n` +
         `   💰 ចំណូល: ${Number(todayStats.revenue).toLocaleString()}៛\n` +
         `   📋 កម្មង់: ${todayStats.orders}\n\n` +
@@ -414,10 +409,7 @@ function buildOrderStatusKeyboard(orderId, currentStatus) {
   // Add cancel button if pending
   if (currentStatus === "pending") {
     buttons.push(
-      Markup.button.callback(
-        "❌ បោះបង់",
-        `order_status:${orderId}:cancelled`,
-      ),
+      Markup.button.callback("❌ បោះបង់", `order_status:${orderId}:cancelled`),
     );
   }
 

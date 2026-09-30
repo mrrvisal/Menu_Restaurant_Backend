@@ -1,10 +1,14 @@
 const crypto = require("crypto");
-const db = require("../config/db");
-const { sendOrderNotification } = require("../services/telegramBot");
-const { broadcast, addOrderClient, emitOrder } = require("../services/sse");
-const webpushSvc = require("../services/webpush");
-const { logActivity } = require("../helpers/audit");
-const salesReport = require("../helpers/salesReport");
+const db = require("../../config/db");
+const { sendOrderNotification } = require("../telegram/telegramBot.service");
+const {
+  broadcast,
+  addOrderClient,
+  emitOrder,
+} = require("../../common/realtime/sse");
+const webpushSvc = require("../notifications/webpush.service");
+const { logActivity } = require("../../common/audit/audit");
+const salesReport = require("../../common/reports/salesReport");
 
 // POST /api/orders - Place order (guest)
 exports.create = async (req, res) => {
@@ -22,7 +26,7 @@ exports.create = async (req, res) => {
 
   try {
     const [restaurants] = await db.query(
-      "SELECT id, name, telegram_chat_id, default_language FROM restaurants WHERE id = ?",
+      "SELECT id, name, telegram_chat_id, default_language, order_tracking FROM restaurants WHERE id = ?",
       [restId],
     );
     if (!restaurants.length) {
@@ -30,8 +34,12 @@ exports.create = async (req, res) => {
     }
     const restaurant = restaurants[0];
 
-    // Tracking token for guest
-    let trackToken = crypto.randomBytes(16).toString("hex");
+    // Tracking token for the guest — only while the owner has guest
+    // tracking ON (Settings → Orders). A null token travels back to the
+    // client, which then never offers the /track link.
+    let trackToken = restaurant.order_tracking
+      ? crypto.randomBytes(16).toString("hex")
+      : null;
     let orderResult;
 
     try {
@@ -104,20 +112,17 @@ exports.create = async (req, res) => {
     // (guarded — if the bot is unreachable the order must still succeed)
     if (restaurant.telegram_chat_id) {
       try {
-        const sent = await sendOrderNotification(
-          restaurant.telegram_chat_id,
-          {
-            orderId,
-            restaurantName: restaurant.name,
-            tableNo: table_no.trim(),
-            customerName: customer_name || null,
-            items,
-            total,
-            note: note || null,
-            createdAt: new Date(),
-            isKhmer,
-          },
-        );
+        const sent = await sendOrderNotification(restaurant.telegram_chat_id, {
+          orderId,
+          restaurantName: restaurant.name,
+          tableNo: table_no.trim(),
+          customerName: customer_name || null,
+          items,
+          total,
+          note: note || null,
+          createdAt: new Date(),
+          isKhmer,
+        });
         if (sent) {
           await db.query(
             "UPDATE orders SET telegram_sent = TRUE WHERE id = ?",
@@ -125,23 +130,16 @@ exports.create = async (req, res) => {
           );
         }
       } catch (tgErr) {
-        console.error(
-          "Telegram notify error:",
-          tgErr?.message || tgErr,
-        );
+        console.error("Telegram notify error:", tgErr?.message || tgErr);
       }
     }
 
-    res
-      .status(200)
-      .json({
-        success: true,
-        orderId,
-        trackToken,
-        message: isKhmer
-          ? "ការបញ្ជាទិញបានជោគជ័យ!"
-          : "Order placed successfully!",
-      });
+    res.status(200).json({
+      success: true,
+      orderId,
+      trackToken,
+      message: isKhmer ? "ការបញ្ជាទិញបានជោគជ័យ!" : "Order placed successfully!",
+    });
   } catch (error) {
     console.error("Order creation error:", error);
     res.status(500).json({ error: "Failed to place order" });
@@ -272,7 +270,10 @@ async function buildReportData(req, restaurantId) {
   const group = REPORT_GROUPS.includes(String(req.query.group))
     ? String(req.query.group)
     : "day";
-  const topLimit = Math.min(Math.max(parseInt(req.query.top_limit) || 10, 1), 50);
+  const topLimit = Math.min(
+    Math.max(parseInt(req.query.top_limit) || 10, 1),
+    50,
+  );
 
   const { whereClause, filters } = buildOrderFilter(req, restaurantId);
   // A sale is anything that was not cancelled — cancelled orders stay visible
@@ -534,7 +535,6 @@ exports.exportCsv = async (req, res) => {
   }
 };
 
-
 // GET /api/restaurants/:id - Public restaurant detail
 exports.getRestaurant = async (req, res) => {
   try {
@@ -636,13 +636,17 @@ exports.track = async (req, res) => {
     const [rows] = await db.query(
       `SELECT o.id, o.status, o.table_no, o.items, o.total, o.note, o.created_at,
               r.name AS restaurant_name, r.theme_color, r.logo_url,
-              r.currency, r.exchange_rate AS exchangeRate
+              r.currency, r.exchange_rate AS exchangeRate,
+              r.order_tracking AS orderTracking
        FROM orders o
        JOIN restaurants r ON r.id = o.restaurant_id
        WHERE o.id = ? AND o.track_token = ?`,
       [orderId, token],
     );
-    if (!rows.length) return res.status(404).json({ error: "Order not found" });
+    // Wrong token, unknown order, or the owner turned tracking OFF — all
+    // answer the same 404, so a disabled link simply looks expired.
+    if (!rows.length || !rows[0].orderTracking)
+      return res.status(404).json({ error: "Order not found" });
     const order = rows[0];
 
     // SSE headers — sent before any data so EventSource can connect

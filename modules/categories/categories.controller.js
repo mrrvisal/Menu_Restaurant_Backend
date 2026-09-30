@@ -1,4 +1,4 @@
-const db = require("../config/db");
+const db = require("../../config/db");
 
 // Helper: resolve restaurant ID for public or authenticated requests
 async function getRestaurantId(req) {
@@ -43,7 +43,9 @@ exports.getAll = async (req, res) => {
     if (!menu_id) {
       const seen = new Set();
       rows = rows.filter((cat) => {
-        const key = String(cat.name || "").trim().toLowerCase();
+        const key = String(cat.name || "")
+          .trim()
+          .toLowerCase();
         if (!key || seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -108,7 +110,9 @@ exports.create = async (req, res) => {
         [menuId, restaurantId, req.user.id],
       );
       if (!menu.length)
-        return res.status(404).json({ error: "Menu not found or not owned by you" });
+        return res
+          .status(404)
+          .json({ error: "Menu not found or not owned by you" });
     } else {
       // Default to the restaurant's first menu so the category is always scoped
       const [defMenu] = await db.query(
@@ -171,7 +175,12 @@ exports.update = async (req, res) => {
     if (name && String(name).trim()) {
       const [dup] = await db.query(
         "SELECT id FROM categories WHERE restaurant_id = ? AND name = ? AND menu_id <=> ? AND id != ? LIMIT 1",
-        [rows[0].restaurant_id, String(name).trim(), rows[0].menu_id, req.params.id],
+        [
+          rows[0].restaurant_id,
+          String(name).trim(),
+          rows[0].menu_id,
+          req.params.id,
+        ],
       );
       if (dup.length)
         return res.status(409).json({

@@ -1,5 +1,5 @@
-const db = require("../config/db");
-const imagekit = require("../config/imagekit");
+const db = require("../../config/db");
+const imagekit = require("../../config/imagekit");
 
 // Helper: resolve restaurant ID for public or authenticated requests
 async function getRestaurantId(req) {
@@ -123,7 +123,9 @@ exports.create = async (req, res) => {
         [menuId, restaurantId, req.user.id],
       );
       if (!menu.length)
-        return res.status(404).json({ error: "Menu not found or not owned by you" });
+        return res
+          .status(404)
+          .json({ error: "Menu not found or not owned by you" });
     } else {
       // Default to the restaurant's first menu so the food is always scoped
       const [defMenu] = await db.query(

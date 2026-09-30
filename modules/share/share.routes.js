@@ -5,8 +5,8 @@
 // Both are public on purpose — chat apps and crawlers cannot log in.
 const express = require("express");
 const QRCode = require("qrcode");
-const db = require("../config/db");
-const { decryptRestaurantId } = require("../helpers/qrWithLogo");
+const db = require("../../config/db");
+const { decryptRestaurantId } = require("../../common/qr/qrWithLogo");
 const {
   DEFAULT_LOGO,
   isWebUrl,
@@ -17,7 +17,7 @@ const {
   buildCardTitle,
   buildCardDescription,
   buildShareCardHtml,
-} = require("../helpers/shareCard");
+} = require("../../common/share/shareCard");
 
 const router = express.Router();
 
@@ -99,7 +99,10 @@ router.get("/qr.png", async (req, res) => {
     return res.status(403).json({ error: "URL host is not allowed" });
   }
 
-  const size = Math.min(600, Math.max(120, parseInt(req.query.size, 10) || 240));
+  const size = Math.min(
+    600,
+    Math.max(120, parseInt(req.query.size, 10) || 240),
+  );
   const dark = sanitizeHexColor(req.query.color, "#111827");
   const light = sanitizeHexColor(req.query.bg, "#ffffff");
 

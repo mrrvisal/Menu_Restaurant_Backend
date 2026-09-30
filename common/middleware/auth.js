@@ -1,5 +1,5 @@
 const jwt = require("jsonwebtoken");
-const db = require("../config/db");
+const db = require("../../config/db");
 
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
 const THROTTLE_TTL = 10 * 60 * 1000; // 10 minutes
@@ -129,4 +129,3 @@ module.exports = {
   requireOwner,
   requireOwnerOrAdmin,
 };
-

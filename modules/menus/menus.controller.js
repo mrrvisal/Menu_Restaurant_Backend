@@ -1,4 +1,4 @@
-const db = require("../config/db");
+const db = require("../../config/db");
 
 // Helper: fetch owner's restaurants so an owner can act on any of them
 async function getOwnerRestaurant(req, restaurantId) {

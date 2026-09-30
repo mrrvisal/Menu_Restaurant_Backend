@@ -22,7 +22,6 @@
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.1.1",
     "mysql2": "^3.6.5",
-    "nodemailer": "^9.0.3",
     "qrcode": "^1.5.4",
     "resend": "^6.17.1",
     "sharp": "^0.35.2",

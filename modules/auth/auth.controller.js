@@ -1,15 +1,15 @@
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-const db = require("../config/db");
-const imagekit = require("../config/imagekit");
-const { sendMail } = require("../config/mailer");
-const { validatePassword } = require("../helpers/passwordPolicy");
-const { logActivity } = require("../helpers/audit");
+const db = require("../../config/db");
+const imagekit = require("../../config/imagekit");
+const { sendMail } = require("../../config/mailer");
+const { validatePassword } = require("../../common/security/passwordPolicy");
+const { logActivity } = require("../../common/audit/audit");
 const {
   extractDeviceInfo,
   lookupIpLocation,
-} = require("../helpers/deviceInfo");
+} = require("../../common/security/deviceInfo");
 
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
@@ -274,7 +274,9 @@ exports.register = async (req, res) => {
           </p>
         </div>
       `,
-    }).catch(err => console.error("Background email send failed:", err.message));
+    }).catch((err) =>
+      console.error("Background email send failed:", err.message),
+    );
 
     // Don't return a token — user must verify email first
     logActivity({
@@ -288,7 +290,8 @@ exports.register = async (req, res) => {
       user: null,
       restaurant: null,
       restaurants: [],
-      message: "Registration successful! Please check your email to verify your account.",
+      message:
+        "Registration successful! Please check your email to verify your account.",
     });
   } catch (err) {
     console.error("Register error:", err);
@@ -309,10 +312,9 @@ async function attemptLogin(
   if (!email || !password)
     return { status: 400, error: "Email and password required" };
 
-  const [rows] = await db.query(
-    `SELECT u.* FROM users u WHERE u.email = ?`,
-    [email],
-  );
+  const [rows] = await db.query(`SELECT u.* FROM users u WHERE u.email = ?`, [
+    email,
+  ]);
   if (!rows.length) return { status: 401, error: "Invalid credentials" };
 
   const user = rows[0];
@@ -374,6 +376,7 @@ async function attemptLogin(
             theme_color AS themeColor,
             sidebar_position AS sidebarPosition,
             currency, exchange_rate AS exchangeRate,
+            order_tracking AS orderTracking,
             status
      FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
     [user.id],
@@ -566,15 +569,17 @@ exports.resendVerification = async (req, res) => {
       [email.trim()],
     );
     if (!rows.length)
-      return res.status(404).json({ error: "No account found with this email" });
+      return res
+        .status(404)
+        .json({ error: "No account found with this email" });
     if (rows[0].email_verified_at)
       return res.status(400).json({ error: "Email already verified" });
 
     const verifyToken = crypto.randomBytes(32).toString("hex");
-    await db.query(
-      "UPDATE users SET email_verify_token = ? WHERE id = ?",
-      [verifyToken, rows[0].id],
-    );
+    await db.query("UPDATE users SET email_verify_token = ? WHERE id = ?", [
+      verifyToken,
+      rows[0].id,
+    ]);
 
     const verifyUrl = `${FRONTEND_URL}/verify-email?token=${verifyToken}`;
     sendMail({
@@ -606,9 +611,13 @@ exports.resendVerification = async (req, res) => {
           </p>
         </div>
       `,
-    }).catch(err => console.error("Background email send failed:", err.message));
+    }).catch((err) =>
+      console.error("Background email send failed:", err.message),
+    );
 
-    res.json({ message: "Verification email has been sent. Please check your inbox." });
+    res.json({
+      message: "Verification email has been sent. Please check your inbox.",
+    });
   } catch (err) {
     console.error("Resend verification error:", err);
     res.status(500).json({ error: "Server error" });
@@ -617,8 +626,7 @@ exports.resendVerification = async (req, res) => {
 
 // ─── FORGOT PASSWORD ───────────────────────────────────────
 exports.forgotPassword = async (req, res) => {
-  const email =
-    typeof req.body.email === "string" ? req.body.email.trim() : "";
+  const email = typeof req.body.email === "string" ? req.body.email.trim() : "";
   if (!email) return res.status(400).json({ error: "Email is required" });
 
   try {
@@ -685,7 +693,9 @@ exports.forgotPassword = async (req, res) => {
       to: email.trim(),
       subject: "Reset your password - Digital Menu",
       html,
-    }).catch(err => console.error("Background email send failed:", err.message));
+    }).catch((err) =>
+      console.error("Background email send failed:", err.message),
+    );
 
     res.json({ message: "Password reset link has been sent to your email." });
   } catch (err) {
@@ -750,6 +760,7 @@ exports.me = async (req, res) => {
               theme_color AS themeColor,
               sidebar_position AS sidebarPosition,
               currency, exchange_rate AS exchangeRate,
+              order_tracking AS orderTracking,
               status
        FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
       [req.user.id],
@@ -789,9 +800,12 @@ exports.updateAccount = async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: "User not found" });
     const user = rows[0];
 
-    const newEmail = email && typeof email === "string" ? email.trim().toLowerCase() : "";
+    const newEmail =
+      email && typeof email === "string" ? email.trim().toLowerCase() : "";
     const wantsEmail = newEmail && newEmail !== user.email.toLowerCase();
-    const wantsPassword = !!(newPassword && String(newPassword).trim().length > 0);
+    const wantsPassword = !!(
+      newPassword && String(newPassword).trim().length > 0
+    );
 
     if (!wantsEmail && !wantsPassword)
       return res.status(400).json({ error: "No changes requested" });
@@ -810,7 +824,9 @@ exports.updateAccount = async (req, res) => {
     if (wantsEmail) {
       const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!EMAIL_RE.test(newEmail))
-        return res.status(400).json({ error: "Please enter a valid email address" });
+        return res
+          .status(400)
+          .json({ error: "Please enter a valid email address" });
 
       const [dupes] = await db.query(
         "SELECT id FROM users WHERE email = ? AND id <> ?",
@@ -856,7 +872,9 @@ exports.updateAccount = async (req, res) => {
         to: newEmail,
         subject: "Verify your new email - Digital Menu",
         html,
-      }).catch((err) => console.error("Background email send failed:", err.message));
+      }).catch((err) =>
+        console.error("Background email send failed:", err.message),
+      );
     }
 
     // ── Password change ──
@@ -925,7 +943,7 @@ exports.createRestaurant = async (req, res) => {
   // Handle optional logo upload
   if (req.file) {
     try {
-      const imagekit = require("../config/imagekit");
+      const imagekit = require("../../config/imagekit");
       const base64 = req.file.buffer.toString("base64");
       const dataUri = `data:${req.file.mimetype};base64,${base64}`;
       const uploadResult = await imagekit.upload({
@@ -980,6 +998,7 @@ exports.createRestaurant = async (req, res) => {
               theme_color AS themeColor,
               sidebar_position AS sidebarPosition,
               currency, exchange_rate AS exchangeRate,
+              order_tracking AS orderTracking,
               status
        FROM restaurants WHERE id = ?`,
       [restaurantId],
@@ -1001,18 +1020,20 @@ exports.createRestaurant = async (req, res) => {
 // Helper: resolve a restaurant owned by the current user; falls back to the
 // first owned restaurant when no restaurant_id is supplied (legacy behavior).
 async function resolveOwnerRestaurant(req) {
-  const requested = parseInt(req.body.restaurant_id || req.query.restaurant_id || 0);
+  const requested = parseInt(
+    req.body.restaurant_id || req.query.restaurant_id || 0,
+  );
   if (requested) {
     const [rows] = await db.query(
       "SELECT id FROM restaurants WHERE id = ? AND owner_id = ?",
-      [requested, req.user.id]
+      [requested, req.user.id],
     );
     if (rows.length) return rows[0].id;
     return null;
   }
   const [rows] = await db.query(
     "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
-    [req.user.id]
+    [req.user.id],
   );
   return rows.length ? rows[0].id : null;
 }
@@ -1072,7 +1093,7 @@ exports.updateRestaurant = async (req, res) => {
   // Handle logo upload if provided
   if (req.file) {
     try {
-      const imagekit = require("../config/imagekit");
+      const imagekit = require("../../config/imagekit");
       const base64 = req.file.buffer.toString("base64");
       const dataUri = `data:${req.file.mimetype};base64,${base64}`;
       const uploadResult = await imagekit.upload({
@@ -1112,7 +1133,7 @@ exports.updateRestaurant = async (req, res) => {
 
     // Fetch updated restaurant
     const [rows] = await db.query(
-      `SELECT id, name, logo_url, telegram_chat_id, telegram_link_code, default_language, theme_color, sidebar_position
+      `SELECT id, name, logo_url, telegram_chat_id, telegram_link_code, default_language, theme_color, sidebar_position, order_tracking
        FROM restaurants WHERE id = ?`,
       [restaurantId],
     );
@@ -1129,6 +1150,7 @@ exports.updateRestaurant = async (req, res) => {
         defaultLanguage: r.default_language,
         themeColor: r.theme_color,
         sidebarPosition: r.sidebar_position,
+        orderTracking: r.order_tracking,
       },
     });
   } catch (err) {
@@ -1143,7 +1165,11 @@ exports.updateRestaurant = async (req, res) => {
 exports.updateTheme = async (req, res) => {
   const { themeColor } = req.body;
   const HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
-  if (!themeColor || typeof themeColor !== "string" || !HEX_RE.test(themeColor.trim())) {
+  if (
+    !themeColor ||
+    typeof themeColor !== "string" ||
+    !HEX_RE.test(themeColor.trim())
+  ) {
     return res.status(400).json({ error: "Invalid theme color" });
   }
 
@@ -1192,6 +1218,32 @@ exports.updateCurrency = async (req, res) => {
   }
 };
 
+// ─── UPDATE GUEST ORDER TRACKING (on / off) ────────────────
+// Owner switch for the public /track page: when tracking is OFF, new
+// orders return no track token (the guest cart never offers the link)
+// and the SSE tracker answers 404 for old links as well.
+// Mirrors updateTheme/updateSidebar: owner-scoped, validated, simple.
+exports.updateOrderTracking = async (req, res) => {
+  const { orderTracking } = req.body;
+  if (typeof orderTracking !== "boolean")
+    return res.status(400).json({ error: "Invalid order tracking value" });
+
+  try {
+    const restaurantId = await resolveOwnerRestaurant(req);
+    if (!restaurantId)
+      return res.status(404).json({ error: "Restaurant not found" });
+
+    await db.query("UPDATE restaurants SET order_tracking = ? WHERE id = ?", [
+      orderTracking ? 1 : 0,
+      restaurantId,
+    ]);
+    res.json({ success: true, orderTracking });
+  } catch (err) {
+    console.error("Update order tracking error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
 // ─── UPDATE RESTAURANT SIDEBAR POSITION ────────────────────
 // Lets the owner choose where their admin sidebar sits: left / right / top / bottom.
 exports.updateSidebar = async (req, res) => {
@@ -1226,10 +1278,10 @@ exports.updateLanguage = async (req, res) => {
     if (!restaurantId)
       return res.status(404).json({ error: "Restaurant not found" });
 
-    await db.query(
-      "UPDATE restaurants SET default_language = ? WHERE id = ?",
-      [language, restaurantId],
-    );
+    await db.query("UPDATE restaurants SET default_language = ? WHERE id = ?", [
+      language,
+      restaurantId,
+    ]);
     res.json({ success: true, language });
   } catch (err) {
     res.status(500).json({ error: "Server error" });
@@ -1276,9 +1328,7 @@ exports.googleLogin = async (req, res) => {
   if (!googleId || !email)
     return res.status(401).json({ error: "Invalid Google token" });
   if (payload.email_verified === false)
-    return res
-      .status(401)
-      .json({ error: "Your Google email is not verified" });
+    return res.status(401).json({ error: "Your Google email is not verified" });
 
   try {
     // 2) Find by google_id (returning Google users) …
@@ -1374,6 +1424,7 @@ exports.googleLogin = async (req, res) => {
               theme_color AS themeColor,
               sidebar_position AS sidebarPosition,
               currency, exchange_rate AS exchangeRate,
+              order_tracking AS orderTracking,
               status
        FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
       [user.id],

@@ -4,13 +4,18 @@ const cors = require("cors");
 require("dotenv").config();
 
 const apiRoutes = require("./routes");
-const shareCardRoutes = require("./routes/shareCard");
-const { getBot } = require("./services/telegramBot");
+const shareCardRoutes = require("./modules/share/share.routes");
+const { getBot } = require("./modules/telegram/telegramBot.service");
+const {
+  errorHandler,
+  normalizeErrorResponses,
+} = require("./common/middleware/errorResponse");
 
 const app = express();
 const PORT = process.env.PORT || 5001;
 
 // Middlewares
+app.use(normalizeErrorResponses);
 app.use(
   cors({
     exposedHeaders: ["Content-Disposition"],
@@ -26,16 +31,10 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.use("/api", apiRoutes);
 app.use("/s", shareCardRoutes);
 
-// Error handler
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  if (err.message === "Only images allowed") {
-    return res.status(400).json({
-      error: "Only image files are allowed (jpeg, jpg, png, webp, gif)",
-    });
-  }
-  res.status(500).json({ error: "Something went wrong!" });
+app.use((req, res) => {
+  res.status(404).json({ error: "Route not found" });
 });
+app.use(errorHandler);
 
 // Telegram bot lifecycle
 const bot = getBot();
