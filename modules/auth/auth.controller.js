@@ -1017,6 +1017,53 @@ exports.createRestaurant = async (req, res) => {
   }
 };
 
+// ─── DELETE RESTAURANT ──────────────────────────────────────
+// Owner removes one of their own restaurants. The foreign keys cascade the
+// delete to menus, categories, foods, orders and QR codes (ON DELETE CASCADE)
+// and preserve the audit trail (activity_logs.restaurant_id becomes NULL) —
+// no other table references the row.
+exports.deleteRestaurant = async (req, res) => {
+  const restaurantId = parseInt(req.params.id, 10);
+  if (!restaurantId)
+    return res.status(400).json({ error: "Invalid restaurant ID" });
+
+  try {
+    // Owner-scoped: only the account that owns this restaurant may delete it.
+    const [rows] = await db.query(
+      "SELECT id, name, logo_url FROM restaurants WHERE id = ? AND owner_id = ?",
+      [restaurantId, req.user.id],
+    );
+    if (!rows.length)
+      return res
+        .status(404)
+        .json({ error: "Restaurant not found or not owned by you" });
+
+    await db.query("DELETE FROM restaurants WHERE id = ?", [restaurantId]);
+
+    // Best-effort cleanup of the uploaded logo in ImageKit (same pattern as
+    // foods.deleteFromImageKit) — a failed cleanup must not fail the delete.
+    if (rows[0].logo_url) {
+      try {
+        await imagekit.deleteFile(new URL(rows[0].logo_url).pathname);
+      } catch (logoErr) {
+        console.warn("Restaurant logo cleanup failed:", logoErr.message);
+      }
+    }
+
+    logActivity({
+      userId: req.user.id,
+      action: "restaurant_deleted",
+      description: `Deleted restaurant "${rows[0].name}" (#${restaurantId})`,
+      ipAddress: req.ip,
+    });
+
+    res.json({ success: true, deletedId: restaurantId });
+  } catch (err) {
+    console.error("Delete restaurant error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
 // Helper: resolve a restaurant owned by the current user; falls back to the
 // first owned restaurant when no restaurant_id is supplied (legacy behavior).
 async function resolveOwnerRestaurant(req) {
@@ -1029,7 +1076,10 @@ async function resolveOwnerRestaurant(req) {
       [requested, req.user.id],
     );
     if (rows.length) return rows[0].id;
-    return null;
+    // The client asked for a restaurant this account doesn't own (stale
+    // localStorage after an account/restaurant switch, or a deleted or
+    // transferred restaurant). Fall through to the first owned restaurant
+    // below instead of hard-failing the save with a 404.
   }
   const [rows] = await db.query(
     "SELECT id FROM restaurants WHERE owner_id = ? ORDER BY id ASC LIMIT 1",

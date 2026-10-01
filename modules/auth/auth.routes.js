@@ -35,6 +35,7 @@ router.post(
   upload.single("logo"),
   controller.createRestaurant,
 );
+router.delete("/auth/restaurants/:id", auth, controller.deleteRestaurant);
 router.patch("/auth/theme", auth, controller.updateTheme);
 router.patch("/auth/sidebar", auth, controller.updateSidebar);
 router.patch("/auth/currency", auth, controller.updateCurrency);
