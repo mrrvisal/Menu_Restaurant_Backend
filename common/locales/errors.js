@@ -75,6 +75,7 @@ const aliases = {
   use_google_signin: "AUTH_INVALID_CREDENTIALS",
   super_admin_use_dedicated_route: "AUTH_FORBIDDEN",
   email_exists_google: "RESOURCE_CONFLICT",
+  call_cooldown: "RATE_LIMITED",
   EMAIL_EXISTS: "RESOURCE_CONFLICT",
   DUPLICATE_RESTAURANT: "RESOURCE_CONFLICT",
   DUPLICATE_CATEGORY: "RESOURCE_CONFLICT",
@@ -92,6 +93,8 @@ const specificMessages = {
   "Admin not found": "រកមិនឃើញអ្នកគ្រប់គ្រង។",
   "Authentication required": "តម្រូវឱ្យចូលប្រើជាមុន។",
   "Cannot delete your own account": "មិនអាចលុបគណនីខ្លួនឯងបានទេ។",
+  "Call not found": "រកមិនឃើញសំណើហៅនេះ។",
+  "Call type must be 'bill' or 'extra'": "ប្រភេទនៃការហៅត្រូវតែជា 'bill' ឬ 'extra'។",
   "Cannot modify your own account this way":
     "មិនអាចកែប្រែគណនីខ្លួនឯងតាមវិធីនេះបានទេ។",
   "Category name is required": "តម្រូវឱ្យមានឈ្មោះប្រភេទ។",
@@ -104,6 +107,7 @@ const specificMessages = {
   "Email already registered": "អ៊ីមែលនេះបានចុះឈ្មោះរួចហើយ។",
   "Email already verified": "អ៊ីមែលបានផ្ទៀងផ្ទាត់រួចហើយ។",
   "Email is required": "តម្រូវឱ្យបញ្ចូលអ៊ីមែល។",
+  "Failed to call the owner": "មិនអាចហៅម្ចាស់ហាងបានទេ។",
   "Failed to delete QR code": "មិនអាចលុបកូដ QR បានទេ។",
   "Failed to delete webhook": "មិនអាចលុប webhook បានទេ។",
   "Failed to generate share link": "មិនអាចបង្កើតតំណចែករំលែកបានទេ។",
@@ -159,6 +163,8 @@ const specificMessages = {
   "Password must be at least 8 characters for super admin":
     "ពាក្យសម្ងាត់ត្រូវមានយ៉ាងហោច ៨ តួអក្សរសម្រាប់អ្នកគ្រប់គ្រងខ្ពស់បំផុត។",
   "Please enter a valid email address": "សូមបញ្ចូលអ៊ីមែលត្រឹមត្រូវ។",
+  "Please wait a moment before calling again":
+    "សូមរង់ចាំបន្តិចសិន មុននឹងហៅម្តងទៀត។",
   "Please verify your email before logging in.":
     "សូមផ្ទៀងផ្ទាត់អ៊ីមែលរបស់អ្នក មុនពេលចូលប្រើ។",
   "Push not configured on the server":

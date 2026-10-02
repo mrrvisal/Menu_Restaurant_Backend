@@ -526,9 +526,55 @@ async function sendOrderNotification(chatId, orderData) {
   }
 }
 
+// ─── SEND TABLE CALL NOTIFICATION (guest calls the owner) ─────────
+// Triggered from the public menu: "bring me the bill" or "I need
+// something extra". No inline keyboard — the owner acts from the dashboard.
+
+async function sendTableCallNotification(chatId, callData) {
+  const bot = getBot();
+  if (!bot || !chatId) return false;
+
+  try {
+    const { restaurantName, tableNo, type, message, isKhmer, createdAt } =
+      callData;
+
+    const fmtTime = (d) =>
+      d.toLocaleTimeString(isKhmer ? "km-KH" : "en-US", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+      });
+
+    const title = isKhmer
+      ? type === "bill"
+        ? "💰 សុំគិតលុយ! 💰"
+        : "🙋 សុំអ្វីបន្ថែម! 🙋"
+      : type === "bill"
+        ? "💰 Bill requested!"
+        : "🙋 Needs something extra!";
+
+    let text = isKhmer
+      ? `${title}\n═══════════════\n🏪 ភោជនីយដ្ឋាន: ${restaurantName}\n🪑 តុលេខ: ${tableNo}\n📅 ${fmtTime(createdAt)}\n`
+      : `${title}\n═══════════════\n🏪 ${restaurantName}\n🪑 Table: ${tableNo}\n📅 ${fmtTime(createdAt)}\n`;
+
+    if (message?.trim()) {
+      text += isKhmer
+        ? `📝 ${message.trim()}\n`
+        : `📝 ${message.trim()}\n`;
+    }
+
+    await bot.telegram.sendMessage(chatId, text);
+    return true;
+  } catch (err) {
+    console.error("Send table call notification error:", err.message);
+    return false;
+  }
+}
+
 module.exports = {
   getBot,
   sendOrderNotification,
+  sendTableCallNotification,
   buildOrderStatusKeyboard,
   getBotInstance: getBot,
 };

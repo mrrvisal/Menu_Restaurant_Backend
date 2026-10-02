@@ -21,6 +21,7 @@ router.use(require("../categories/categories.routes"));
 router.use(require("../foods/foods.routes"));
 router.use(require("../menus/menus.routes"));
 router.use(require("../orders/orders.routes"));
+router.use(require("../calls/calls.routes"));
 router.use(require("../telegram/telegram.routes"));
 
 // ─── PUBLIC ROUTES ─────────────────────────────────────────

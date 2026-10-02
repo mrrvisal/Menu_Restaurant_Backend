@@ -16,6 +16,16 @@ const pool = mysql.createPool({
   connectTimeout: 30000,
   enableKeepAlive: true,
   keepAliveInitialDelay: 15000,
+  // ─── TIMESTAMP PARSING (fixes the "7h ago" bug) ──────────────
+  // The DB session runs on UTC (`@@system_time_zone = 'UTC'`), so `created_at`
+  // columns hold true UTC. mysql2's default (timezone: "local") parses a
+  // DATETIME/TIMESTAMP by APPLYING THE NODE PROCESS OFFSET — on a UTC+7
+  // machine a row stored as 16:21 UTC came back as 16:21+07:00 = 09:21Z, so
+  // a call placed seconds ago rendered as "7h ago" in the dashboard.
+  // "Z" tells mysql2 the value is already UTC, so the Date is the real
+  // instant and the browser localises it correctly. Override with
+  // DB_TIMEZONE only if the DB session is deliberately offset from UTC.
+  timezone: process.env.DB_TIMEZONE || "Z",
   ssl: process.env.DB_CA_PATH
     ? {
         ca: fs.readFileSync(path.resolve(__dirname, process.env.DB_CA_PATH)),
