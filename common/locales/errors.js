@@ -89,6 +89,7 @@ const aliases = {
 // exact English text; dynamic texts (template literals / concatenation)
 // match by prefix in specificPrefixes below.
 const specificMessages = {
+  "A valid url is required": "តម្រូវឱ្យមាន url ត្រឹមត្រូវ។",
   "Access denied. No token provided.": "ចូលមិនបានទេ។ មិនបានផ្តល់ថូខិន។",
   "Admin not found": "រកមិនឃើញអ្នកគ្រប់គ្រង។",
   "Authentication required": "តម្រូវឱ្យចូលប្រើជាមុន។",
@@ -101,6 +102,8 @@ const specificMessages = {
   "Could not build the QR code": "មិនអាចបង្កើតកូដ QR បានទេ។",
   "Current password is incorrect": "ពាក្យសម្ងាត់បច្ចុប្បន្នមិនត្រឹមត្រូវ។",
   "Current password is required": "តម្រូវឱ្យបញ្ចូលពាក្យសម្ងាត់បច្ចុប្បន្ន។",
+  "Design name is required": "តម្រូវឱ្យមានឈ្មោះរចនាប័ទ្ម។",
+  "Design not found": "រកមិនឃើញរចនាប័ទ្មនេះ។",
   "Device not found": "រកមិនឃើញឧបករណ៍។",
   "Email and password required": "តម្រូវឱ្យមានអ៊ីមែលនិងពាក្យសម្ងាត់។",
   "Email already exists": "អ៊ីមែលនេះមានរួចហើយ។",
@@ -108,14 +111,17 @@ const specificMessages = {
   "Email already verified": "អ៊ីមែលបានផ្ទៀងផ្ទាត់រួចហើយ។",
   "Email is required": "តម្រូវឱ្យបញ្ចូលអ៊ីមែល។",
   "Failed to call the owner": "មិនអាចហៅម្ចាស់ហាងបានទេ។",
+  "Failed to delete design": "មិនអាចលុបរចនាប័ទ្មបានទេ។",
   "Failed to delete QR code": "មិនអាចលុបកូដ QR បានទេ។",
   "Failed to delete webhook": "មិនអាចលុប webhook បានទេ។",
   "Failed to generate share link": "មិនអាចបង្កើតតំណចែករំលែកបានទេ។",
+  "Failed to load designs": "មិនអាចទាញរចនាប័ទ្មដែលបានរក្សាទុកបានទេ។",
   "Failed to load QR code": "មិនអាចទាញកូដ QR បានទេ។",
   "Failed to load saved QR codes":
     "មិនអាចទាញកូដ QR ដែលបានរក្សាទុកបានទេ។",
   "Failed to place order": "មិនអាចដាក់ការកម្មង់បានទេ។",
   "Failed to remove subscription": "មិនអាចលុបការជាវបានទេ។",
+  "Failed to save design": "មិនអាចរក្សាទុករចនាប័ទ្មបានទេ។",
   "Failed to save subscription": "មិនអាចរក្សាទុកការជាវបានទេ។",
   "Failed to send test push": "មិនអាចផ្ញើសារសាកល្បងបានទេ។",
   "Failed to set webhook": "មិនអាចកំណត់ webhook បានទេ។",
@@ -140,6 +146,11 @@ const specificMessages = {
     "ថូខិនផ្ទុកថ្មីមិនត្រឹមត្រូវ ឬបានផុតកំណត់។",
   "Invalid or expired token": "ថូខិនមិនត្រឹមត្រូវ ឬបានផុតកំណត់។",
   "Invalid subscription": "ការជាវមិនត្រឹមត្រូវ។",
+  "Menu design is required": "តម្រូវឱ្យមានរចនាប័ទ្មមីនុយ។",
+  "Menu design is not valid JSON": "រចនាប័ទ្មមីនុយមិនមែនជា JSON ត្រឹមត្រូវទេ។",
+  "Menu design is too large": "រចនាប័ទ្មមីនុយធំពេក។",
+  "Menu designs are not set up on this server yet":
+    "រចនាប័ទ្មមីនុយមិនទាន់បានដំឡើងនៅលើម៉ាស៊ីនមេនេះទេ។",
   "Menu name is required": "តម្រូវឱ្យមានឈ្មោះមីនុយ។",
   "Menu not found or not owned by you":
     "រកមិនឃើញមីនុយ ឬអ្នកមិនមែនជាម្ចាស់។",

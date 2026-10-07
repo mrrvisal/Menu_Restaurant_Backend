@@ -671,7 +671,7 @@ exports.track = async (req, res) => {
       themeColor: order.theme_color || null,
       logoUrl: order.logo_url || null,
       currency: order.currency || "KHR",
-      exchangeRate: Number(order.exchangeRate) || 4100,
+      exchangeRate: Number(order.exchangeRate) || 4000,
     };
     res.write(`event: status\ndata: ${JSON.stringify(snapshot)}\n\n`);
 
