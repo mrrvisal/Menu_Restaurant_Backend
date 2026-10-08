@@ -377,6 +377,7 @@ async function attemptLogin(
             sidebar_position AS sidebarPosition,
             currency, exchange_rate AS exchangeRate,
             order_tracking AS orderTracking,
+            call_button_enabled AS callButtonEnabled,
             status
      FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
     [user.id],
@@ -761,6 +762,7 @@ exports.me = async (req, res) => {
               sidebar_position AS sidebarPosition,
               currency, exchange_rate AS exchangeRate,
               order_tracking AS orderTracking,
+              call_button_enabled AS callButtonEnabled,
               status
        FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
       [req.user.id],
@@ -999,6 +1001,7 @@ exports.createRestaurant = async (req, res) => {
               sidebar_position AS sidebarPosition,
               currency, exchange_rate AS exchangeRate,
               order_tracking AS orderTracking,
+              call_button_enabled AS callButtonEnabled,
               status
        FROM restaurants WHERE id = ?`,
       [restaurantId],
@@ -1183,7 +1186,7 @@ exports.updateRestaurant = async (req, res) => {
 
     // Fetch updated restaurant
     const [rows] = await db.query(
-      `SELECT id, name, logo_url, telegram_chat_id, telegram_link_code, default_language, theme_color, sidebar_position, order_tracking
+      `SELECT id, name, logo_url, telegram_chat_id, telegram_link_code, default_language, theme_color, sidebar_position, order_tracking, call_button_enabled
        FROM restaurants WHERE id = ?`,
       [restaurantId],
     );
@@ -1201,6 +1204,7 @@ exports.updateRestaurant = async (req, res) => {
         themeColor: r.theme_color,
         sidebarPosition: r.sidebar_position,
         orderTracking: r.order_tracking,
+        callButtonEnabled: Boolean(r.call_button_enabled),
       },
     });
   } catch (err) {
@@ -1290,6 +1294,28 @@ exports.updateOrderTracking = async (req, res) => {
     res.json({ success: true, orderTracking });
   } catch (err) {
     console.error("Update order tracking error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// ─── SHOW GUEST "CALL OWNER" BUTTON (on / off) ─────────────
+exports.updateCallButton = async (req, res) => {
+  const { callButtonEnabled } = req.body;
+  if (typeof callButtonEnabled !== "boolean")
+    return res.status(400).json({ error: "Invalid call button value" });
+
+  try {
+    const restaurantId = await resolveOwnerRestaurant(req);
+    if (!restaurantId)
+      return res.status(404).json({ error: "Restaurant not found" });
+
+    await db.query(
+      "UPDATE restaurants SET call_button_enabled = ? WHERE id = ?",
+      [callButtonEnabled ? 1 : 0, restaurantId],
+    );
+    res.json({ success: true, callButtonEnabled });
+  } catch (err) {
+    console.error("Update call button error:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -1475,6 +1501,7 @@ exports.googleLogin = async (req, res) => {
               sidebar_position AS sidebarPosition,
               currency, exchange_rate AS exchangeRate,
               order_tracking AS orderTracking,
+              call_button_enabled AS callButtonEnabled,
               status
        FROM restaurants WHERE owner_id = ? ORDER BY id ASC`,
       [user.id],

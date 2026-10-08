@@ -542,13 +542,17 @@ exports.getRestaurant = async (req, res) => {
       `SELECT id, name, logo_url AS logoUrl, default_language AS defaultLanguage,
               telegram_chat_id AS telegramChatId, telegram_link_code AS telegramLinkCode,
               theme_color AS themeColor,
-              currency, exchange_rate AS exchangeRate
+              currency, exchange_rate AS exchangeRate,
+              call_button_enabled AS callButtonEnabled
        FROM restaurants WHERE id = ? AND status = 'active'`,
       [req.params.id],
     );
     if (!rows.length)
       return res.status(404).json({ error: "Restaurant not found" });
-    res.json(rows[0]);
+    res.json({
+      ...rows[0],
+      callButtonEnabled: Boolean(rows[0].callButtonEnabled),
+    });
   } catch (err) {
     console.error("Get restaurant error:", err);
     res.status(500).json({ error: "Server error" });

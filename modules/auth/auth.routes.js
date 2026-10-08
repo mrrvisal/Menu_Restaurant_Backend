@@ -40,5 +40,6 @@ router.patch("/auth/theme", auth, controller.updateTheme);
 router.patch("/auth/sidebar", auth, controller.updateSidebar);
 router.patch("/auth/currency", auth, controller.updateCurrency);
 router.patch("/auth/tracking", auth, controller.updateOrderTracking);
+router.patch("/auth/call-button", auth, controller.updateCallButton);
 
 module.exports = router;
