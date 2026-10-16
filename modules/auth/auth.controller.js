@@ -11,12 +11,19 @@ const {
   lookupIpLocation,
 } = require("../../common/security/deviceInfo");
 
-const JWT_SECRET = process.env.JWT_SECRET || "secret";
+// C-3: JWT_SECRET validated at boot — no `|| "secret"` fallback
+const { JWT_SECRET } = require("../../common/config/secrets");
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
-// Token lifetimes
-const JWT_ACCESS_TTL = process.env.JWT_ACCESS_TTL || "24h";
+// Token lifetimes — #10: access tokens are SHORT (5-min SSE stream tokens are
+// minted separately; refresh slides the session forward silently).
+const JWT_ACCESS_TTL = process.env.JWT_ACCESS_TTL || "15m";
 const JWT_REFRESH_TTL = process.env.JWT_REFRESH_TTL || "30d";
+
+// Valid bcrypt hash used to equalise response timing when an account has no
+// password (Google-only / force-reset) — bcrypt.compare always runs (#14).
+const DUMMY_BCRYPT_HASH =
+  "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy";
 
 // Helper: generate unique 6-char link code for Telegram
 async function generateLinkCode() {
@@ -219,15 +226,31 @@ exports.register = async (req, res) => {
     );
     if (emailCheck.length) {
       const existing = emailCheck[0];
-      // A Google-created account has no password yet — point the owner at the
-      // two ways in instead of a dead-end "Email already registered".
-      if (!existing.password && existing.google_id)
-        return res.status(409).json({
-          error:
-            "This email already has an account created with Google. Use “Continue with Google” to sign in, or “Forgot password” to set a password.",
-          code: "email_exists_google",
-        });
-      return res.status(409).json({ error: "Email already registered" });
+      // #14 — user enumeration: NEVER reveal that the address is taken.
+      // Answer exactly like a fresh signup and privately hint at the truth
+      // in an email to the owner instead.
+      const hintHtml = existing.password
+        ? "<p>This address already has a Digital Menu account. If it is yours, sign in instead — or use “Forgot password” to set a new password.</p>"
+        : "<p>This address already has a Digital Menu account created with Google. Sign in with “Continue with Google”, or set a password via “Forgot password”.</p>";
+      sendMail({
+        to: email.trim(),
+        subject: "You already have a Digital Menu account",
+        html: `<div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;">
+          <h2 style="color:#14532d;">You already have an account</h2>
+          ${hintHtml}
+          <p style="color:#9ca3af;font-size:11px;">If you didn't try to register, you can safely ignore this email.</p>
+        </div>`,
+      }).catch((err) =>
+        console.error("Background email send failed:", err.message),
+      );
+      return res.status(201).json({
+        token: null,
+        user: null,
+        restaurant: null,
+        restaurants: [],
+        message:
+          "Registration successful! Please check your email to verify your account.",
+      });
     }
 
     // Generate email verify token
@@ -237,7 +260,7 @@ exports.register = async (req, res) => {
     // Create user (owner) — inactive until email is verified.
     // NOTE: no restaurant is auto-created here; the owner adds one
     // after logging in (one account → many restaurants).
-    await db.query(
+    const [regResult] = await db.query(
       `INSERT INTO users (email, password, role, status, email_verify_token)
        VALUES (?, ?, 'owner', 'inactive', ?)`,
       [email.trim(), hashedPassword || "", verifyToken],
@@ -280,9 +303,9 @@ exports.register = async (req, res) => {
 
     // Don't return a token — user must verify email first
     logActivity({
-      userId,
+      userId: regResult.insertId,
       action: "register",
-      description: `New ${role} account registered: ${email.trim()}`,
+      description: `New owner account registered: ${email.trim()}`,
       ipAddress: req.ip,
     });
     res.status(201).json({
@@ -295,7 +318,7 @@ exports.register = async (req, res) => {
     });
   } catch (err) {
     console.error("Register error:", err);
-    res.status(500).json({ error: "Server error: " + err.message });
+    res.status(500).json({ error: "Server error" }); // #12 — no internals to clients
   }
 };
 
@@ -312,27 +335,45 @@ async function attemptLogin(
   if (!email || !password)
     return { status: 400, error: "Email and password required" };
 
+  // #16 — failed logins must be audited (no passwords/hashes ever logged)
+  const auditFailedLogin = (userId, reason) =>
+    logActivity({
+      userId: userId || null,
+      action: "login_failed",
+      description: `${reason} for: ${email}`,
+      ipAddress: req.ip,
+    });
+
   const [rows] = await db.query(`SELECT u.* FROM users u WHERE u.email = ?`, [
     email,
   ]);
-  if (!rows.length) return { status: 401, error: "Invalid credentials" };
+  if (!rows.length) {
+    await auditFailedLogin(null, "Failed login (unknown email)");
+    return { status: 401, error: "Invalid credentials" };
+  }
 
   const user = rows[0];
 
-  // Google-only accounts have no password yet (see googleLogin): bcrypt.compare
-  // would throw on a NULL hash, so fail fast with a message that tells the user
-  // how to get in instead of a misleading "Invalid credentials".
-  if (!user.password) {
+  // Always run a bcrypt compare so "unknown email", "wrong password" and
+  // "account without a password" take the same time (user enumeration, #14).
+  const match = await bcrypt.compare(password, user.password || DUMMY_BCRYPT_HASH);
+
+  // C-2: accounts force-reset by an administrator must choose a new password
+  // before any JWT is issued.
+  if (user.must_reset_password) {
     return {
-      status: 401,
+      status: 403,
       error:
-        "This account was created with Google. Use the “Continue with Google” button, or set a password via “Forgot password”.",
-      code: "use_google_signin",
+        "Your password was reset by an administrator. Use “Forgot password” to set a new one, then sign in.",
+      code: "must_reset_password",
     };
   }
 
-  const match = await bcrypt.compare(password, user.password);
-  if (!match) return { status: 401, error: "Invalid credentials" };
+  // No usable password (Google-only or reset) → uniform message, no hints (#14)
+  if (!user.password || !match) {
+    await auditFailedLogin(user.id, "Failed login (bad password)");
+    return { status: 401, error: "Invalid credentials" };
+  }
 
   // ── Role gating — super admins can ONLY sign in via the dedicated route ──
   if (requireSuperAdmin && user.role !== "super_admin") {
@@ -533,6 +574,22 @@ exports.refresh = async (req, res) => {
   }
 };
 
+// ─── STREAM TOKEN (short-lived, SSE-only — audit fix #11) ──────
+// EventSource bakes its token into the URL, so the dashboard must NOT
+// put the 24h access token in a query string. It exchanges the Bearer
+// token here for a 5-minute JWT with typ:"stream" that ONLY the
+// /api/orders/stream endpoint accepts.
+exports.streamToken = async (req, res) => {
+  try {
+    const payload = { id: req.user.id, role: req.user.role, typ: "stream" };
+    if (req.user.sid) payload.sid = req.user.sid;
+    res.json({ token: jwt.sign(payload, JWT_SECRET, { expiresIn: "5m" }) });
+  } catch (err) {
+    console.error("Stream token error:", err.message);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
 // ─── VERIFY EMAIL ──────────────────────────────────────────
 exports.verifyEmail = async (req, res) => {
   const { token } = req.query;
@@ -569,12 +626,12 @@ exports.resendVerification = async (req, res) => {
       "SELECT id, email, email_verified_at FROM users WHERE email = ? AND role = 'owner'",
       [email.trim()],
     );
-    if (!rows.length)
-      return res
-        .status(404)
-        .json({ error: "No account found with this email" });
-    if (rows[0].email_verified_at)
-      return res.status(400).json({ error: "Email already verified" });
+    // #14 — uniform response for unknown OR already-verified emails
+    if (!rows.length || rows[0].email_verified_at) {
+      return res.json({
+        message: "Verification email has been sent. Please check your inbox.",
+      });
+    }
 
     const verifyToken = crypto.randomBytes(32).toString("hex");
     await db.query("UPDATE users SET email_verify_token = ? WHERE id = ?", [
@@ -632,13 +689,17 @@ exports.forgotPassword = async (req, res) => {
 
   try {
     const [rows] = await db.query(
-      "SELECT id, email FROM users WHERE email = ? AND role = 'owner'",
+      // Super admins must be able to self-serve too (C-2 force-reset flow)
+      "SELECT id, email FROM users WHERE email = ? AND role IN ('owner', 'super_admin')",
       [email],
     );
-    if (!rows.length)
-      return res
-        .status(404)
-        .json({ error: "No account found with this email" });
+    // #14 — uniform response: the answer is identical whether or not the
+    // account exists, so this endpoint can't be used to enumerate emails.
+    if (!rows.length) {
+      return res.json({
+        message: "Password reset link has been sent to your email.",
+      });
+    }
 
     const token = crypto.randomBytes(32).toString("hex");
 
@@ -727,13 +788,21 @@ exports.resetPassword = async (req, res) => {
       return res.status(400).json({ error: "Invalid or expired token" });
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    await db.query("UPDATE users SET password = ? WHERE id = ?", [
-      hashedPassword,
-      rows[0].user_id,
-    ]);
+    // C-2: clear the admin force-reset flag when the new password lands
+    await db.query(
+      "UPDATE users SET password = ?, must_reset_password = 0 WHERE id = ?",
+      [hashedPassword, rows[0].user_id],
+    );
     await db.query("UPDATE password_resets SET used_at = NOW() WHERE id = ?", [
       rows[0].id,
     ]);
+    // #13 — a password reset must revoke EVERY existing session of the user
+    await db
+      .query(
+        "UPDATE device_sessions SET revoked = 1, revoked_at = NOW() WHERE user_id = ?",
+        [rows[0].user_id],
+      )
+      .catch(() => {}); // device tables not migrated yet — reset still succeeds
 
     res.json({ message: "Password reset successfully! You can now log in." });
   } catch (err) {
@@ -887,10 +956,17 @@ exports.updateAccount = async (req, res) => {
           error: "Password must contain: " + pwCheck.errors.join(", "),
         });
       const hashedPassword = await bcrypt.hash(String(newPassword), 10);
-      await db.query("UPDATE users SET password = ? WHERE id = ?", [
-        hashedPassword,
-        user.id,
-      ]);
+      await db.query(
+        "UPDATE users SET password = ?, must_reset_password = 0 WHERE id = ?",
+        [hashedPassword, user.id],
+      );
+      // #13 — sign out every OTHER device; the current one stays alive
+      await db
+        .query(
+          "UPDATE device_sessions SET revoked = 1, revoked_at = NOW() WHERE user_id = ? AND (? IS NULL OR session_token <> ?)",
+          [user.id, req.user.sid || null, req.user.sid || null],
+        )
+        .catch(() => {}); // device tables not migrated yet — change still succeeds
     }
 
     // ── Refresh session with a token that carries the current email ──
@@ -1123,11 +1199,19 @@ exports.unlinkTelegram = async (req, res) => {
     if (!restaurantId)
       return res.status(404).json({ error: "Restaurant not found" });
 
+    // Rotate the link code while unlinking: the old code stays valid forever
+    // otherwise, and anyone who saw it (e.g. a former staff member) could
+    // silently re-link the restaurant to their own Telegram chat.
+    const newCode = await generateLinkCode();
     await db.query(
-      "UPDATE restaurants SET telegram_chat_id = NULL WHERE id = ?",
-      [restaurantId],
+      "UPDATE restaurants SET telegram_chat_id = NULL, telegram_link_code = ? WHERE id = ?",
+      [newCode, restaurantId],
     );
-    res.json({ success: true, message: "Telegram unlinked" });
+    res.json({
+      success: true,
+      message: "Telegram unlinked",
+      linkCode: newCode,
+    });
   } catch (err) {
     console.error("Unlink Telegram error:", err);
     res.status(500).json({ error: "Server error" });

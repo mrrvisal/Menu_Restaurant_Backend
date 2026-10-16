@@ -2,6 +2,7 @@
 const express = require("express");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 const router = express.Router();
 
 const {
@@ -10,6 +11,8 @@ const {
   requireSuperAdmin,
   requireOwnerOrAdmin,
 } = require("../../common/middleware/auth");
+const { JWT_SECRET } = require("../../common/config/secrets");
+const { validatePassword } = require("../../common/security/passwordPolicy");
 const { addClient } = require("../../common/realtime/sse");
 const webpushSvc = require("../notifications/webpush.service");
 const db = require("../../config/db");
@@ -42,12 +45,30 @@ router.get("/restaurants", async (req, res) => {
 router.get(
   "/orders/stream",
   (req, res, next) => {
-    // EventSource (native browser API) can't set custom headers,
-    // so also accept the JWT token as a query parameter.
-    if (req.query.token) {
-      req.headers.authorization = `Bearer ${req.query.token}`;
+    // #11 — EventSource (native browser API) can't set headers, so the
+    // dashboard now passes a SHORT-LIVED (5 min) ?stream_token= minted by
+    // GET /api/auth/stream-token. The 24h access token in a URL is no
+    // longer accepted, so a leaked URL dies within minutes.
+    const streamToken = req.query.stream_token;
+    if (streamToken) {
+      try {
+        const decoded = jwt.verify(String(streamToken), JWT_SECRET);
+        if (decoded.typ !== "stream") throw new Error("wrong token type");
+        req.user = {
+          id: decoded.id,
+          email: decoded.email || null,
+          role: decoded.role,
+          sid: decoded.sid || null,
+        };
+      } catch (_) {
+        return res
+          .status(401)
+          .json({ error: "Invalid or expired stream token" });
+      }
+      return requireOwnerOrAdmin(req, res, next);
     }
-    auth(req, res, () => requireOwnerOrAdmin(req, res, next));
+    // Header-based Bearer auth still works (health probes, non-browser clients)
+    return auth(req, res, () => requireOwnerOrAdmin(req, res, next));
   },
   (req, res) => {
     // Resolve the restaurant(s) to stream: the requested one when
@@ -275,7 +296,17 @@ router.post("/admin/admins", auth, requireSuperAdmin, async (req, res) => {
         .json({ error: "Role must be 'owner' or 'super_admin'" });
     }
 
-    if (role === "super_admin" && (!password || password.length < 8)) {
+    // #22 — the strong password policy applies to EVERY created account,
+    // not just super admins. (Owner accounts without a password may still be
+    // created — the owner sets one through the verify/forgot-password flow.)
+    if (password) {
+      const pwCheck = validatePassword(password);
+      if (!pwCheck.valid) {
+        return res.status(400).json({
+          error: "Password must contain: " + pwCheck.errors.join(", "),
+        });
+      }
+    } else if (role === "super_admin") {
       return res.status(400).json({
         error: "Password must be at least 8 characters for super admin",
       });
@@ -684,11 +715,12 @@ router.post(
       if (!rows.length)
         return res.status(404).json({ error: "User not found" });
 
-      // Readable 10-char temp password (avoid 0/O, 1/l/I ambiguities)
+      // Readable temp password (avoid 0/O, 1/l/I ambiguities) — 16 chars from
+      // a CSPRNG (#18: Math.random is not suitable for credentials)
       const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
       let tempPassword = "";
-      for (let i = 0; i < 10; i++)
-        tempPassword += chars.charAt(Math.floor(Math.random() * chars.length));
+      for (let i = 0; i < 16; i++)
+        tempPassword += chars.charAt(crypto.randomInt(0, chars.length));
       const hash = await bcrypt.hash(tempPassword, 10);
       await db.query("UPDATE users SET password = ? WHERE id = ?", [
         hash,

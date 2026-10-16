@@ -3,9 +3,8 @@
 const QRCode = require("qrcode");
 const sharp = require("sharp");
 const crypto = require("crypto");
-
-const QR_SECRET =
-  process.env.QR_SECRET || "fallback-qr-secret-change-in-production";
+// C-3: validated at boot — no insecure fallback literal
+const { QR_SECRET } = require("../config/secrets");
 
 function encryptRestaurantId(restaurantId) {
   const iv = crypto.randomBytes(16);

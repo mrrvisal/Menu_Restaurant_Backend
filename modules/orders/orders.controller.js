@@ -14,15 +14,23 @@ const salesReport = require("../../common/reports/salesReport");
 exports.create = async (req, res) => {
   const { table_no, note, items, restaurant_id, customer_name } = req.body;
 
-  if (!table_no || !table_no.trim()) {
+  if (!table_no || !String(table_no).trim()) {
     return res.status(400).json({ error: "Table number is required" });
   }
-  if (!items || !items.length) {
+  if (!Array.isArray(items) || !items.length) {
     return res.status(400).json({ error: "Order items are required" });
+  }
+  if (items.length > 50) {
+    return res.status(400).json({ error: "Too many items in one order" });
   }
 
   const restId = restaurant_id ? parseInt(restaurant_id, 10) : 1;
-  const total = items.reduce((sum, item) => sum + item.price * item.qty, 0);
+  // Free-text inputs are bounded before they reach the DB / Telegram (#15)
+  const safeTable = String(table_no).trim().slice(0, 50);
+  const safeNote = note ? String(note).trim().slice(0, 500) : null;
+  const safeCustomer = customer_name
+    ? String(customer_name).trim().slice(0, 100)
+    : null;
 
   try {
     const [restaurants] = await db.query(
@@ -33,6 +41,49 @@ exports.create = async (req, res) => {
       return res.status(404).json({ error: "Restaurant not found" });
     }
     const restaurant = restaurants[0];
+
+    // ── #15: NEVER trust client prices — recompute from the foods table ──
+    const normalized = [];
+    for (const raw of items) {
+      const qty = Math.max(1, Math.min(99, parseInt(raw && raw.qty, 10) || 0));
+      if (!qty) continue;
+      const name = String((raw && raw.name) || "").trim().slice(0, 120);
+      if (!name) continue;
+      const foodId = parseInt(raw && raw.id, 10);
+      let price;
+      if (foodId) {
+        const [foodRows] = await db.query(
+          "SELECT price FROM foods WHERE id = ? AND restaurant_id = ?",
+          [foodId, restId],
+        );
+        if (!foodRows.length) {
+          return res
+            .status(400)
+            .json({ error: "One or more menu items are no longer available" });
+        }
+        price = parseFloat(foodRows[0].price) || 0;
+      } else {
+        // Menus without food ids (demo/legacy clients): accept the client's
+        // price but bound it so totals can't be zeroed or made NaN/huge.
+        price = Number(raw && raw.price);
+        if (!Number.isFinite(price) || price < 0 || price > 100000000) {
+          return res.status(400).json({ error: "Invalid item price" });
+        }
+      }
+      normalized.push({
+        id: Number.isFinite(foodId) ? foodId : null,
+        name,
+        price,
+        qty,
+      });
+    }
+    if (!normalized.length) {
+      return res.status(400).json({ error: "Order items are required" });
+    }
+    const total = normalized.reduce(
+      (sum, item) => sum + item.price * item.qty,
+      0,
+    );
 
     // Tracking token for the guest — only while the owner has guest
     // tracking ON (Settings → Orders). A null token travels back to the
@@ -47,11 +98,11 @@ exports.create = async (req, res) => {
         "INSERT INTO orders (restaurant_id, table_no, note, items, total, status, customer_name, track_token) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
         [
           restId,
-          table_no.trim(),
-          note || null,
-          JSON.stringify(items),
+          safeTable,
+          safeNote,
+          JSON.stringify(normalized),
           total,
-          customer_name || null,
+          safeCustomer,
           trackToken,
         ],
       );
@@ -63,11 +114,11 @@ exports.create = async (req, res) => {
           "INSERT INTO orders (restaurant_id, table_no, note, items, total, status, customer_name) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
           [
             restId,
-            table_no.trim(),
-            note || null,
-            JSON.stringify(items),
+            safeTable,
+            safeNote,
+            JSON.stringify(normalized),
             total,
-            customer_name || null,
+            safeCustomer,
           ],
         );
       } else {
@@ -84,11 +135,11 @@ exports.create = async (req, res) => {
         orderId,
         restaurantId: restId,
         restaurantName: restaurant.name || null,
-        tableNo: table_no.trim(),
-        customerName: customer_name || null,
-        items,
+        tableNo: safeTable,
+        customerName: safeCustomer,
+        items: normalized,
         total,
-        note: note || null,
+        note: safeNote,
         createdAt: new Date(),
       });
     } catch (sseErr) {
@@ -100,8 +151,8 @@ exports.create = async (req, res) => {
     webpushSvc
       .sendToRestaurantOwner(restId, {
         title: `🔔 ${restaurant.name || "Digital Menu"} — New order`,
-        body: `Table ${table_no.trim()}${
-          customer_name ? ` · ${customer_name}` : ""
+        body: `Table ${safeTable}${
+          safeCustomer ? ` · ${safeCustomer}` : ""
         } · ${Number(total).toLocaleString()}៛`,
         tag: `order-${orderId}`,
         url: "/dashboard",
@@ -115,11 +166,11 @@ exports.create = async (req, res) => {
         const sent = await sendOrderNotification(restaurant.telegram_chat_id, {
           orderId,
           restaurantName: restaurant.name,
-          tableNo: table_no.trim(),
-          customerName: customer_name || null,
-          items,
+          tableNo: safeTable,
+          customerName: safeCustomer,
+          items: normalized,
           total,
-          note: note || null,
+          note: safeNote,
           createdAt: new Date(),
           isKhmer,
         });
@@ -538,9 +589,11 @@ exports.exportCsv = async (req, res) => {
 // GET /api/restaurants/:id - Public restaurant detail
 exports.getRestaurant = async (req, res) => {
   try {
+    // #4 (High) — the PUBLIC menu must never receive telegram_chat_id or
+    // telegram_link_code: the link code lets anyone re-point the restaurant's
+    // order notifications at their own Telegram chat.
     const [rows] = await db.query(
       `SELECT id, name, logo_url AS logoUrl, default_language AS defaultLanguage,
-              telegram_chat_id AS telegramChatId, telegram_link_code AS telegramLinkCode,
               theme_color AS themeColor,
               currency, exchange_rate AS exchangeRate,
               call_button_enabled AS callButtonEnabled

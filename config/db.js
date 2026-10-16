@@ -1,13 +1,14 @@
 const fs = require("fs");
 const path = require("path");
 const mysql = require("mysql2/promise");
-require("dotenv").config();
+// C-3: DB_PASSWORD is validated (min length) at boot
+const { DB_PASSWORD } = require("../common/config/secrets");
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   port: parseInt(process.env.DB_PORT, 10) || 3306,
   user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
+  password: DB_PASSWORD,
   database: process.env.DB_NAME,
   waitForConnections: true,
   connectionLimit: 10,

@@ -73,8 +73,7 @@ function getBot() {
 
       await ctx.reply(
         `✅ ភ្ជាប់គណនីជោគជ័យ!\n\n` +
-          `🏪 ភោជនីយដ្ឋាន: ${restaurant.name}\n` +
-          `🆔 Chat ID: ${chatId}\n\n` +
+          `🏪 ភោជនីយដ្ឋាន: ${restaurant.name}\n\n` +
           `ឥឡូវនេះ អ្នកនឹងទទួលបានការជូនដំណឹងរាល់ពេលមានការកម្មង់ថ្មី! 🎉`,
         Markup.keyboard([["📋 កម្មង់ថ្មី", "📊 ស្ថិតិ"], ["❓ ជំនួយ"]])
           .resize()
@@ -571,10 +570,65 @@ async function sendTableCallNotification(chatId, callData) {
   }
 }
 
+// ─── WEBHOOK MODE ──────────────────────────────────────────
+// The bot receives updates two ways (TELEGRAM_UPDATES_MODE):
+//   • "polling" (default) — bot.launch() pulls updates itself; works on
+//     localhost, no public URL needed.
+//   • "webhook" — Telegram POSTs every update to /api/telegram/webhook.
+//     Needs a PUBLIC HTTPS API + TELEGRAM_WEBHOOK_URL + TELEGRAM_WEBHOOK_SECRET.
+// Register the webhook (idempotent) — used at boot in webhook mode and by
+// the super-admin GET /api/telegram/set-webhook endpoint.
+async function configureWebhook() {
+  if (!bot) {
+    const err = new Error("TELEGRAM_BOT_TOKEN not configured");
+    err.code = "ECONFIG";
+    throw err;
+  }
+  const url = process.env.TELEGRAM_WEBHOOK_URL;
+  if (!url || !url.startsWith("https://")) {
+    const err = new Error(
+      "TELEGRAM_WEBHOOK_URL must be the public https://…/api/telegram/webhook URL",
+    );
+    err.code = "ECONFIG";
+    throw err;
+  }
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  if (!secret) {
+    // Fail closed: the webhook endpoint is public — without secret_token
+    // anyone could POST forged updates (fake link confirmations, fake orders).
+    const err = new Error(
+      "TELEGRAM_WEBHOOK_SECRET is required in webhook mode",
+    );
+    err.code = "ECONFIG";
+    throw err;
+  }
+  const ok = await bot.telegram.setWebhook(url, {
+    secret_token: secret,
+    // Only what this bot handles: text commands (/start, /link) and the
+    // order-status inline-keyboard callbacks. Anything else is noise.
+    allowed_updates: ["message", "callback_query"],
+    // Drop updates queued while the server was down — stale order alerts
+    // from hours ago are noise, not news.
+    drop_pending_updates: true,
+  });
+  if (!ok) throw new Error("Telegram setWebhook call failed");
+  return url;
+}
+
+// Process one update delivered by Telegram's webhook. Throws on failure so
+// the controller can answer 5xx and Telegram re-delivers later
+// (at-least-once: a lost order alert is worse than a duplicate).
+async function handleWebhookUpdate(update) {
+  if (!bot) throw new Error("Telegram bot not initialized");
+  await bot.handleUpdate(update);
+}
+
 module.exports = {
   getBot,
   sendOrderNotification,
   sendTableCallNotification,
   buildOrderStatusKeyboard,
   getBotInstance: getBot,
+  configureWebhook,
+  handleWebhookUpdate,
 };

@@ -1,14 +1,19 @@
 const crypto = require("crypto");
 
-// Extract client IP honoring reverse-proxy headers
+// Extract client IP (#19: trust proxy is enabled in server.js, so req.ip is
+// the REAL client — Render's proxy sets X-Forwarded-For and Express strips
+// it from untrusted hops when trust proxy = 1). The raw-header fallback
+// only exists for bare local runs without a proxy; spoofed XFF can no
+// longer poison audit logs behind Render.
 function getClientIp(req) {
+  const ip = (req.ip || (req.connection && req.connection.remoteAddress) || "")
+    .replace("::ffff:", "")
+    .trim();
+  if (ip) return ip === "::1" ? "127.0.0.1" : ip;
+
   const xff = req.headers["x-forwarded-for"];
   if (xff) return String(xff).split(",")[0].trim();
-  if (req.headers["x-real-ip"]) return String(req.headers["x-real-ip"]).trim();
-
-  return (req.ip || (req.connection && req.connection.remoteAddress) || "")
-    .replace("::ffff:", "")
-    .replace("::1", "127.0.0.1");
+  return (req.headers["x-real-ip"] || "").trim();
 }
 
 function isPrivateIp(ip) {

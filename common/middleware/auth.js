@@ -1,7 +1,7 @@
 const jwt = require("jsonwebtoken");
 const db = require("../../config/db");
-
-const JWT_SECRET = process.env.JWT_SECRET || "secret";
+// C-3: validated at boot — no `|| "secret"` fallback anywhere
+const { JWT_SECRET } = require("../config/secrets");
 const THROTTLE_TTL = 10 * 60 * 1000; // 10 minutes
 const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
 

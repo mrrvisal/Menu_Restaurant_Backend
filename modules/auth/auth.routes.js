@@ -19,6 +19,8 @@ router.get("/auth/devices/history", auth, controller.listLoginHistory);
 router.delete("/auth/devices", auth, controller.revokeAllOtherDevices);
 router.delete("/auth/devices/:id", auth, controller.revokeDevice);
 router.get("/auth/me", auth, controller.me);
+// #11 — 5-minute SSE-only token (replaces ?token=<24h access token>)
+router.get("/auth/stream-token", auth, controller.streamToken);
 router.patch("/auth/account", auth, controller.updateAccount);
 router.get("/auth/link-code", auth, controller.getLinkCode);
 router.patch("/auth/unlink-telegram", auth, controller.unlinkTelegram);

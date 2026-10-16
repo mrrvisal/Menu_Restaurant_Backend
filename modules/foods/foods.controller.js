@@ -150,9 +150,10 @@ exports.create = async (req, res) => {
         img = uploadResult.url;
         imgFileId = uploadResult.fileId;
       } catch (uploadErr) {
+        console.error("Food image upload failed:", uploadErr.message); // detail stays server-side (#12)
         return res
           .status(500)
-          .json({ error: `Image upload failed: ${uploadErr.message}` });
+          .json({ error: "Image upload failed" }); // #12 — no upload internals
       }
     }
 
@@ -175,7 +176,7 @@ exports.create = async (req, res) => {
     ]);
     res.status(201).json(newRow[0]);
   } catch (err) {
-    res.status(500).json({ error: "Server error: " + err.message });
+    res.status(500).json({ error: "Server error" }); // #12 — no internals to clients
   }
 };
 

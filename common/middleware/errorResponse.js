@@ -71,7 +71,12 @@ function errorHandler(err, req, res, next) {
         ? "FILE_TYPE_NOT_ALLOWED"
         : undefined;
 
-  if (status >= 500) console.error("Request failed:", err.message);
+  if (status >= 500) {
+    // #12 — 5xx messages can leak SQL/paths/upload internals: log the truth,
+    // tell the client only that something went wrong.
+    console.error("Request failed:", err.message);
+    return sendError(req, res, status, code, "Internal server error");
+  }
   return sendError(req, res, status, code, err.message);
 }
 

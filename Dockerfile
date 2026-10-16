@@ -15,11 +15,14 @@ FROM base AS runner
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Ensure runtime directories exist
-RUN mkdir -p /app/uploads
+# Ensure runtime directories exist and are writable by the unprivileged user
+# (#20: never run the API as root inside the container)
+RUN mkdir -p /app/uploads \
+ && chown node:node /app /app/uploads
 
 ENV NODE_ENV=production
 EXPOSE 5001
 
+USER node
 CMD ["node", "server.js"]
 
