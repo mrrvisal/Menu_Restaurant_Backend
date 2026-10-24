@@ -1054,8 +1054,9 @@ exports.createRestaurant = async (req, res) => {
     const linkCode = await generateLinkCode();
 
     const [restaurantResult] = await db.query(
-      `INSERT INTO restaurants (owner_id, name, logo_url, telegram_link_code, default_language)
-       VALUES (?, ?, ?, ?, 'km')`,
+      `INSERT INTO restaurants
+         (owner_id, name, logo_url, telegram_link_code, default_language, theme_color, call_button_enabled)
+       VALUES (?, ?, ?, ?, 'km', '#0f766e', 0)`,
       [req.user.id, name.trim(), logoUrl, linkCode],
     );
     const restaurantId = restaurantResult.insertId;
@@ -1625,31 +1626,66 @@ exports.googleLogin = async (req, res) => {
 // revoke any of them. Revoking flips `revoked = 1`; the auth middleware
 // then rejects that device's token with code "device_revoked".
 
-// GET /api/auth/devices — list all devices for the logged-in account
+// GET /api/auth/devices — list active devices for the logged-in account
 exports.listDevices = async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT id, device_id AS deviceId, device_name AS deviceName,
+      `SELECT id, device_name AS deviceName,
               device_type AS deviceType, browser, browser_version AS browserVersion,
-              os, os_version AS osVersion, screen, timezone, language,
-              platform, hardware,
-              user_agent AS userAgent,
-              ip_address AS ipAddress, city, region, country, isp,
-              latitude, longitude, asn, org,
-              is_proxy AS isProxy, is_hosting AS isHosting,
-              login_count AS loginCount, last_active_at AS lastActiveAt,
-              last_login_at AS lastLoginAt, created_at AS firstSeenAt,
-              (session_token IS NOT NULL AND session_token = ?) AS isCurrent,
-              revoked, revoked_at AS revokedAt
+              os, os_version AS osVersion, city, region, country,
+              last_active_at AS lastActiveAt,
+              last_login_at AS lastLoginAt,
+              (session_token IS NOT NULL AND session_token = ?) AS isCurrent
        FROM device_sessions
-       WHERE user_id = ?
-       ORDER BY revoked ASC, last_active_at DESC`,
+       WHERE user_id = ? AND revoked = 0
+       ORDER BY last_active_at DESC`,
       [req.user.sid || "", req.user.id],
     );
     res.json(rows);
   } catch (err) {
     if (err.code === "ER_NO_SUCH_TABLE") return res.json([]); // not migrated yet
     console.error("List devices error:", err.message);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+const INACTIVE_SESSION_OPTIONS = [7, 30, 90, 180];
+
+// GET /api/auth/devices/settings — get the account's inactive-session policy
+exports.getDeviceSettings = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      "SELECT inactive_session_days AS inactiveDays FROM users WHERE id = ? LIMIT 1",
+      [req.user.id],
+    );
+    if (!rows.length) return res.status(404).json({ error: "User not found" });
+    res.json({ inactiveDays: rows[0].inactiveDays });
+  } catch (err) {
+    console.error("Get device settings error:", err.message);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// PATCH /api/auth/devices/settings — update the account's inactive-session policy
+exports.updateDeviceSettings = async (req, res) => {
+  const inactiveDays = Number(req.body?.inactiveDays);
+  if (!INACTIVE_SESSION_OPTIONS.includes(inactiveDays)) {
+    return res.status(400).json({ error: "Invalid inactive-session period" });
+  }
+  try {
+    const [result] = await db.query(
+      "UPDATE users SET inactive_session_days = ? WHERE id = ?",
+      [inactiveDays, req.user.id],
+    );
+    if (!result.affectedRows) {
+      const [rows] = await db.query("SELECT id FROM users WHERE id = ? LIMIT 1", [
+        req.user.id,
+      ]);
+      if (!rows.length) return res.status(404).json({ error: "User not found" });
+    }
+    res.json({ inactiveDays });
+  } catch (err) {
+    console.error("Update device settings error:", err.message);
     res.status(500).json({ error: "Server error" });
   }
 };

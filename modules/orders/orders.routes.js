@@ -7,6 +7,7 @@ router.get("/restaurants/:id", controller.getRestaurant);
 router.post("/orders", controller.create);
 router.get("/orders", auth, requireOwnerOrAdmin, controller.getAll);
 router.get("/orders/stats", auth, requireOwnerOrAdmin, controller.stats);
+router.get("/orders/report", auth, requireOwnerOrAdmin, controller.report);
 router.get("/orders/export", auth, requireOwnerOrAdmin, controller.exportCsv);
 router.get("/orders/track", controller.track);
 router.patch(

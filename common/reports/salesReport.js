@@ -51,7 +51,6 @@ const CSV_LABELS = {
     net_revenue: "Revenue (excl. cancelled)",
     net_orders: "Orders (excl. cancelled)",
     items_sold: "Items sold",
-    avg_order_value: "Average order value",
     cancelled_orders: "Cancelled orders",
     cancelled_revenue: "Cancelled amount",
     status_pending: "Pending",
@@ -85,7 +84,6 @@ const CSV_LABELS = {
     net_revenue: "ចំណូលសុទ្ធ (មិនរាប់បោះបង់)",
     net_orders: "ការកម្មង់ (មិនរាប់បោះបង់)",
     items_sold: "ចំនួនមុខម្ហូបដែលលក់បាន",
-    avg_order_value: "តម្លៃកម្មង់មធ្យម",
     cancelled_orders: "កម្មង់បោះបង់",
     cancelled_revenue: "ទឹកប្រាក់កម្មង់បោះបង់",
     status_pending: "រង់ចាំ",
@@ -334,4 +332,3 @@ module.exports = {
   buildBuckets,
   zeroFillSeries,
 };
-

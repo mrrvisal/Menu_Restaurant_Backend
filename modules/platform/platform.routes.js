@@ -342,7 +342,8 @@ router.post("/admin/admins", auth, requireSuperAdmin, async (req, res) => {
 
     if (role === "owner") {
       await db.query(
-        `INSERT INTO restaurants (owner_id, name, status) VALUES (?, ?, 'active')`,
+        `INSERT INTO restaurants (owner_id, name, status, theme_color, call_button_enabled)
+         VALUES (?, ?, 'active', '#0f766e', 0)`,
         [adminId, `${fullName || email.split("@")[0]}'s Restaurant`],
       );
     }
@@ -494,7 +495,8 @@ router.delete(
 router.get("/admin/users", auth, requireSuperAdmin, async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT u.id, u.email, u.role, u.status, u.email_verified_at, u.last_login_at, u.created_at,
+      `SELECT u.id, u.email, u.full_name, u.role, u.status,
+              u.email_verified_at, u.last_login_at, u.created_at,
               GROUP_CONCAT(DISTINCT r.name ORDER BY r.name SEPARATOR ', ') AS restaurant_name
        FROM users u
        LEFT JOIN restaurants r ON r.owner_id = u.id
@@ -685,11 +687,28 @@ router.get(
   async (req, res) => {
     try {
       const [rows] = await db.query(
-        `SELECT id, device_name AS deviceName, method, ip_address AS ipAddress,
-                city, region, country, browser, os, created_at AS createdAt
-         FROM device_login_history
-         WHERE user_id = ?
-         ORDER BY id DESC
+        `SELECT dlh.id, dlh.device_id AS deviceId,
+                dlh.device_name AS deviceName, dlh.method,
+                COALESCE(dlh.ip_address, ds.ip_address) AS ipAddress,
+                COALESCE(dlh.city, ds.city) AS city,
+                COALESCE(dlh.region, ds.region) AS region,
+                COALESCE(dlh.country, ds.country) AS country,
+                COALESCE(dlh.browser, ds.browser) AS browser,
+                COALESCE(dlh.os, ds.os) AS os,
+                COALESCE(dlh.asn, ds.asn) AS asn,
+                COALESCE(dlh.user_agent, ds.user_agent) AS userAgent,
+                dlh.created_at AS createdAt,
+                ds.device_type AS deviceType, ds.browser_version AS browserVersion,
+                ds.os_version AS osVersion, ds.screen, ds.timezone, ds.language,
+                ds.platform, ds.hardware, ds.isp, ds.latitude, ds.longitude,
+                ds.org, ds.is_proxy AS isProxy, ds.is_hosting AS isHosting,
+                ds.login_count AS loginCount, ds.last_active_at AS lastActiveAt,
+                ds.revoked, ds.revoked_at AS revokedAt
+         FROM device_login_history dlh
+         LEFT JOIN device_sessions ds
+           ON ds.user_id = dlh.user_id AND ds.device_id = dlh.device_id
+         WHERE dlh.user_id = ?
+         ORDER BY dlh.id DESC
          LIMIT 15`,
         [req.params.id],
       );

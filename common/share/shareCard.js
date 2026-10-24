@@ -127,15 +127,13 @@ function buildCardUrl(origin, params = {}) {
   else if (params.restaurant_id)
     search.set("restaurant_id", params.restaurant_id);
   if (params.table) search.set("table", params.table);
-  if (params.to) search.set("to", params.to);
   const qs = search.toString();
   return qs ? `${base}?${qs}` : base;
 }
 
 // ─── TEXT ──────────────────────────────────────────────────────────────────
 
-// Bilingual (Khmer first, English after) so the preview reads well for every
-// customer, whichever chat app renders it.
+// Keep menu titles and table-specific descriptions bilingual.
 function buildCardTitle(restaurantName, tableNo) {
   const name = restaurantName || DEFAULT_SITE_NAME;
   const table = tableNo ? ` — តុ ${tableNo} / Table ${tableNo}` : "";
@@ -145,12 +143,12 @@ function buildCardTitle(restaurantName, tableNo) {
 function buildCardDescription(restaurantName, tableNo) {
   const name = restaurantName || DEFAULT_SITE_NAME;
   const km = tableNo
-    ? `តុលេខ ${tableNo} · ស្កេន QR ដើម្បីមើលមីនុយ ${name} និងកម្មង់ភ្លាមៗ`
-    : `ស្កេន QR ដើម្បីមើលមីនុយ ${name} និងកម្មង់ភ្លាមៗ`;
+    ? `តុលេខ ${tableNo} · ស្កេន QR ដើម្បីមើលមីនុយ ${name} និងកម្មង់`
+    : "";
   const en = tableNo
     ? `Table ${tableNo} · Scan the QR code to browse ${name} and order straight from your table.`
-    : `Scan the QR code to browse ${name} and order straight from your table.`;
-  return truncate(`${km} · ${en}`);
+    : "";
+  return truncate(tableNo ? `${km} · ${en}` : en);
 }
 
 // ─── HTML ──────────────────────────────────────────────────────────────────
@@ -313,4 +311,3 @@ module.exports = {
   buildCardDescription,
   buildShareCardHtml,
 };
-

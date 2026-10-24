@@ -7,6 +7,7 @@ const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
 // In-memory throttle for device last-active updates (persisted at most once per minute)
 const activityThrottle = new Map();
+let inactivityCleanupRunning = false;
 
 setInterval(() => {
   const now = Date.now();
@@ -14,6 +15,25 @@ setInterval(() => {
     if (now - ts > THROTTLE_TTL) {
       activityThrottle.delete(key);
     }
+  }
+}, CLEANUP_INTERVAL).unref();
+
+setInterval(async () => {
+  if (inactivityCleanupRunning) return;
+  inactivityCleanupRunning = true;
+  try {
+    await db.query(
+      `UPDATE device_sessions ds
+       JOIN users u ON u.id = ds.user_id
+       SET ds.revoked = 1, ds.revoked_at = NOW()
+       WHERE ds.revoked = 0
+         AND COALESCE(ds.last_active_at, ds.last_login_at, ds.created_at)
+             < DATE_SUB(NOW(), INTERVAL u.inactive_session_days DAY)`,
+    );
+  } catch (err) {
+    console.error("Inactive device-session cleanup failed:", err.message);
+  } finally {
+    inactivityCleanupRunning = false;
   }
 }, CLEANUP_INTERVAL).unref();
 

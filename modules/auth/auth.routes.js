@@ -15,6 +15,8 @@ router.post("/auth/resend-verification", controller.resendVerification);
 router.post("/auth/forgot-password", controller.forgotPassword);
 router.post("/auth/reset-password", controller.resetPassword);
 router.get("/auth/devices", auth, controller.listDevices);
+router.get("/auth/devices/settings", auth, controller.getDeviceSettings);
+router.patch("/auth/devices/settings", auth, controller.updateDeviceSettings);
 router.get("/auth/devices/history", auth, controller.listLoginHistory);
 router.delete("/auth/devices", auth, controller.revokeAllOtherDevices);
 router.delete("/auth/devices/:id", auth, controller.revokeDevice);

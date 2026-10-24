@@ -234,9 +234,12 @@ exports.getAll = async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 //  SALES REPORTS  (dashboard metrics + Reports tab + CSV export)
 //  ───────────────────────────────────────────────────────────
-//  One shared builder feeds GET /orders/stats (JSON) and
-//  GET /orders/export (CSV) so the screen and the downloaded file can
-//  never disagree on the numbers.
+//  Two builders share the same aggregation so the dashboard, the
+//  on-screen report and the downloaded CSV always agree:
+//   • buildStats()      -> GET /orders/stats  (lightweight dashboard payload)
+//   • buildReportData() -> GET /orders/report + GET /orders/export (full data)
+//  Both run an identical headline query; buildReportData adds the
+//  breakdowns (summary, series, topItems, byTable, byHour, byStatus).
 // ═════════════════════════════════════════════════════════════
 
 // Resolve which restaurant a report belongs to: the requested one when the
@@ -313,6 +316,49 @@ const GROUP_EXPR = {
 function toNum(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
+}
+
+// Lightweight dashboard metrics — served by GET /orders/stats and refreshed
+// by the SSE stream on every live order event, so it must stay cheap: just the
+// headline totals and the per-day series (no breakdowns). The dashboard reads
+// these gross totals directly; the net/cancelled breakdown lives on /orders.
+async function buildStats(req, restaurantId) {
+  const { whereClause, filters } = buildOrderFilter(req, restaurantId);
+
+  // Headline totals (all statuses — gross, identical meaning to the legacy
+  // fields that callers of /orders/stats already relied on).
+  const [[summary]] = await db.query(
+    `SELECT
+       COALESCE(SUM(total), 0) AS totalRevenue,
+       COUNT(*) AS totalOrders
+     FROM orders
+     WHERE ${whereClause}`,
+    filters,
+  );
+
+  // Legacy per-day series (all statuses, newest first) — same shape as before
+  // so the dashboard metrics strip / 7-day chart keep working untouched.
+  const [daily] = await db.query(
+    `SELECT
+       DATE(created_at) AS day,
+       COUNT(*) AS orders,
+       COALESCE(SUM(total), 0) AS revenue
+     FROM orders
+     WHERE ${whereClause}
+     GROUP BY DATE(created_at)
+     ORDER BY DATE(created_at) DESC`,
+    filters,
+  );
+
+  return {
+    totalRevenue: summary.totalRevenue,
+    totalOrders: summary.totalOrders,
+    daily: daily.map((row) => ({
+      day: row.day,
+      orders: row.orders,
+      revenue: row.revenue,
+    })),
+  };
 }
 
 // Everything the Reports tab and the CSV export need for one restaurant and
@@ -462,9 +508,6 @@ async function buildReportData(req, restaurantId) {
       revenue: netRevenue,
       orders: netOrders,
       itemsSold,
-      avgOrderValue: netOrders
-        ? Math.round((netRevenue / netOrders) * 100) / 100
-        : 0,
       cancelledOrders: toNum(summary.cancelledOrders),
       cancelledRevenue: toNum(summary.cancelledRevenue),
       bestPeriod: bestPeriod && bestPeriod.orders ? bestPeriod : null,
@@ -485,14 +528,31 @@ async function buildReportData(req, restaurantId) {
   };
 }
 
-// GET /api/orders/stats - revenue and order analytics for owner's restaurant
+// GET /api/orders/stats - lightweight revenue/order metrics for the dashboard.
+// Returns only { totalRevenue, totalOrders, daily } — the SSE stream refreshes
+// this on every live order event, so the heavy report breakdowns are
+// deliberately excluded; see GET /orders/report for the full report data set.
 exports.stats = async (req, res) => {
+  try {
+    const restaurantId = await resolveReportRestaurant(req, res);
+    if (!restaurantId) return; // 404 already sent
+    res.json(await buildStats(req, restaurantId));
+  } catch (err) {
+    console.error("Order stats error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// GET /api/orders/report - full sales report (summary + breakdowns) for the
+// Reports tab. Shares its numbers with GET /orders/export (CSV) so the on-
+// screen report and the downloaded file can never disagree.
+exports.report = async (req, res) => {
   try {
     const restaurantId = await resolveReportRestaurant(req, res);
     if (!restaurantId) return; // 404 already sent
     res.json(await buildReportData(req, restaurantId));
   } catch (err) {
-    console.error("Order stats error:", err);
+    console.error("Order report error:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -556,7 +616,6 @@ exports.exportCsv = async (req, res) => {
           { metric: L.net_revenue, value: s.revenue },
           { metric: L.net_orders, value: s.orders },
           { metric: L.items_sold, value: s.itemsSold },
-          { metric: L.avg_order_value, value: s.avgOrderValue },
           { metric: L.cancelled_orders, value: s.cancelledOrders },
           { metric: L.cancelled_revenue, value: s.cancelledRevenue },
           { metric: L.range_start, value: data.range.startDate || "" },
