@@ -264,10 +264,122 @@ exports.remove = async (req, res) => {
       [req.params.id, req.user.id],
     );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
-    if (rows[0].img_file_id) await deleteFromImageKit(rows[0].img_file_id);
     await db.query("DELETE FROM foods WHERE id = ?", [req.params.id]);
+    if (rows[0].img_file_id) {
+      const [references] = await db.query("SELECT id FROM foods WHERE img_file_id = ? LIMIT 1", [rows[0].img_file_id]);
+      if (!references.length) await deleteFromImageKit(rows[0].img_file_id);
+    }
     res.json({ message: "Deleted successfully" });
   } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// DELETE several foods in one request. Images are deleted only once even if
+// two selected rows happen to share the same ImageKit file.
+exports.bulkRemove = async (req, res) => {
+  try {
+    const ids = [...new Set((req.body.ids || []).map(Number).filter(Number.isInteger))];
+    if (!ids.length) return res.status(400).json({ error: "Food ids are required" });
+
+    const placeholders = ids.map(() => "?").join(",");
+    const [rows] = await db.query(
+      `SELECT f.id, f.img_file_id FROM foods f
+       JOIN restaurants r ON r.id = f.restaurant_id
+       WHERE f.id IN (${placeholders}) AND r.owner_id = ?`,
+      [...ids, req.user.id],
+    );
+    if (!rows.length) return res.status(404).json({ error: "No selected foods found" });
+
+    await db.query(`DELETE FROM foods WHERE id IN (${rows.map(() => "?").join(",")})`, rows.map((row) => row.id));
+    for (const fileId of new Set(rows.map((row) => row.img_file_id).filter(Boolean))) {
+      const [references] = await db.query("SELECT id FROM foods WHERE img_file_id = ? LIMIT 1", [fileId]);
+      if (!references.length) await deleteFromImageKit(fileId);
+    }
+    res.json({ deleted: rows.length });
+  } catch (err) {
+    console.error("Bulk food delete failed:", err.message);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// Copy or move selected foods between restaurants. Category names are matched
+// in the destination menu, so moving keeps the same category when it exists.
+exports.bulkTransfer = async (req, res) => {
+  try {
+    const ids = [...new Set((req.body.ids || []).map(Number).filter(Number.isInteger))];
+    const action = req.body.action;
+    const targetRestaurantId = Number(req.body.restaurant_id);
+    if (!ids.length || !["copy", "move"].includes(action) || !targetRestaurantId) {
+      return res.status(400).json({ error: "ids, action, and restaurant_id are required" });
+    }
+
+    const [destRestaurants] = await db.query(
+      "SELECT id FROM restaurants WHERE id = ? AND owner_id = ?",
+      [targetRestaurantId, req.user.id],
+    );
+    if (!destRestaurants.length) return res.status(404).json({ error: "Destination restaurant not found" });
+
+    const foodPlaceholders = ids.map(() => "?").join(",");
+    const [sourceFoods] = await db.query(
+      `SELECT f.*, c.name AS category_name
+       FROM foods f
+       JOIN restaurants r ON r.id = f.restaurant_id
+       LEFT JOIN categories c ON c.id = f.category
+       WHERE f.id IN (${foodPlaceholders}) AND r.owner_id = ?`,
+      [...ids, req.user.id],
+    );
+    if (!sourceFoods.length) return res.status(404).json({ error: "No selected foods found" });
+
+    let targetMenuId = Number(req.body.menu_id) || null;
+    if (targetMenuId) {
+      const [menus] = await db.query(
+        "SELECT id FROM menus WHERE id = ? AND restaurant_id = ?",
+        [targetMenuId, targetRestaurantId],
+      );
+      if (!menus.length) return res.status(404).json({ error: "Destination menu not found" });
+    } else {
+      const [defaultMenu] = await db.query(
+        "SELECT id FROM menus WHERE restaurant_id = ? ORDER BY id ASC LIMIT 1",
+        [targetRestaurantId],
+      );
+      targetMenuId = defaultMenu.length ? defaultMenu[0].id : null;
+    }
+
+    async function destinationCategory(categoryName) {
+      if (!categoryName) return null;
+      const [existing] = await db.query(
+        "SELECT id FROM categories WHERE restaurant_id = ? AND menu_id <=> ? AND LOWER(name) = LOWER(?) ORDER BY id ASC LIMIT 1",
+        [targetRestaurantId, targetMenuId, categoryName],
+      );
+      if (existing.length) return existing[0].id;
+      const [created] = await db.query(
+        "INSERT INTO categories (restaurant_id, menu_id, name) VALUES (?, ?, ?)",
+        [targetRestaurantId, targetMenuId, categoryName],
+      );
+      return created.insertId;
+    }
+
+    const copied = [];
+    for (const food of sourceFoods) {
+      const categoryId = await destinationCategory(food.category_name);
+      if (action === "copy") {
+        const [result] = await db.query(
+          "INSERT INTO foods (restaurant_id, menu_id, name, price, category, img, img_file_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [targetRestaurantId, targetMenuId, food.name, food.price, categoryId, food.img, food.img_file_id, food.status || "available"],
+        );
+        copied.push(result.insertId);
+      } else {
+        await db.query(
+          "UPDATE foods SET restaurant_id = ?, menu_id = ?, category = ? WHERE id = ?",
+          [targetRestaurantId, targetMenuId, categoryId, food.id],
+        );
+      }
+    }
+
+    res.json({ action, transferred: sourceFoods.length, ids: copied });
+  } catch (err) {
+    console.error("Bulk food transfer failed:", err.message);
     res.status(500).json({ error: "Server error" });
   }
 };

@@ -10,6 +10,8 @@ const controller = require("./foods.controller");
 const router = express.Router();
 router.get("/foods", softAuth, controller.getAll);
 router.get("/foods/:id", controller.getOne);
+router.post("/foods/bulk-delete", auth, requireOwnerOrAdmin, controller.bulkRemove);
+router.post("/foods/bulk-transfer", auth, requireOwnerOrAdmin, controller.bulkTransfer);
 router.post(
   "/foods",
   auth,
