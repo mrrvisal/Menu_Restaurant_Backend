@@ -274,13 +274,15 @@ async function resolveReportRestaurant(req, res) {
 function buildOrderFilter(req, restaurantId) {
   const filters = [restaurantId];
   let whereClause = "restaurant_id = ?";
-  if (req.query.start_date) {
+  const startDate = String(req.query.start_date || "").trim();
+  const endDate = String(req.query.end_date || "").trim();
+  if (startDate) {
     whereClause += " AND created_at >= ?";
-    filters.push(`${req.query.start_date} 00:00:00`);
+    filters.push(`${startDate} 00:00:00`);
   }
-  if (req.query.end_date) {
+  if (endDate) {
     whereClause += " AND created_at <= ?";
-    filters.push(`${req.query.end_date} 23:59:59`);
+    filters.push(`${endDate} 23:59:59`);
   }
   return { whereClause, filters };
 }
